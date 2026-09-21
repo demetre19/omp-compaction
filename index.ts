@@ -52,7 +52,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatPct, formatTokens, renderContextBar } from "./context-bar.ts";
 import {
@@ -153,7 +153,6 @@ interface Runtime {
 	deliveryTimer?: ReturnType<typeof setTimeout>;
 	/** Deferred session-start work (resume nudge or pending-note compaction); cancelled on shutdown / tree switch. */
 	recoveryTimer?: ReturnType<typeof setTimeout>;
-	requestRender?: () => void;
 	alive: boolean;
 	idleRequestEpoch: number;
 	promptErrors: Set<string>;
@@ -456,10 +455,43 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
-		// OMP's setFooter is a no-op stub (extension-ui-controller.ts): the status-line
-		// hook segment is the live channel, in every mode that has UI.
-		if (ctx.hasUI) ctx.ui.setStatus("self-compact", [contextBarText(), statusTag(ctx)].filter(Boolean).join(" "));
-		R.requestRender?.();
+		// OMP's setFooter is a no-op stub (extension-ui-controller.ts). The colored channel is
+		// setWidget (Text preserves ANSI); the status-line hook segment is the plain fallback.
+		if (ctx.mode === "tui") {
+			ctx.ui.setWidget("self-compact", [coloredStatusLine(ctx)], { placement: "belowEditor" });
+		} else if (ctx.hasUI) {
+			ctx.ui.setStatus("self-compact", [contextBarText(), statusTag(ctx)].filter(Boolean).join(" "));
+		}
+	}
+
+	/** The colored one-line gauge for the TUI widget: [bar] pct used/window TAG ~soft !warn |forced. */
+	function coloredStatusLine(ctx: ExtensionContext): string {
+		const theme = ctx.ui.theme;
+		const t = R.thresholds;
+		const u = R.usage;
+		const bar = renderContextBar({
+			usedPct: t ? u.percent : null,
+			cachedPct: u.window > 0 ? (u.cachedTokens / u.window) * 100 : 0,
+			softPct: t?.softPct ?? 0,
+			warnPct: t?.warnPct ?? 0,
+			forcedPct: t?.forcedPct ?? 0,
+		});
+		const cells = bar.cells
+			.map((c) => {
+				if (c === "#") return theme.fg("success", c);
+				if (c === "=") return theme.fg("accent", c);
+				if (c === "~") return theme.fg("muted", c);
+				if (c === "!") return theme.fg("warning", c);
+				if (c === "|") return theme.fg("error", c);
+				return theme.fg("dim", c);
+			})
+			.join("");
+		const problem = inert();
+		const tag = statusTag(ctx);
+		const phase = tag ? ` ${theme.fg(problem ? "error" : locked() ? "error" : levelColor(R.level), tag)}` : "";
+		const tokens = u.tokens !== null && u.window > 0 ? theme.fg("dim", ` ${formatTokens(u.tokens)}/${formatTokens(u.window)}`) : "";
+		const legend = t ? theme.fg("dim", ` ~${formatPct(t.softPct)} !${formatPct(t.warnPct)} |${formatPct(t.forcedPct)}`) : "";
+		return `${theme.fg("dim", "[")}${cells}${theme.fg("dim", `] ${bar.label}`)}${tokens}${phase}${legend}`;
 	}
 
 	// -------------------------------------------------------- compaction checks
@@ -969,47 +1001,6 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return new Text(`${header}\n${theme.fg("text", note)}`, options.outputPad ?? 1, 0);
 	});
 
-	function installFooter(ctx: ExtensionContext) {
-		if (ctx.mode !== "tui") return;
-		ctx.ui.setFooter((tui, theme) => {
-			R.requestRender = () => tui.requestRender();
-			return {
-				dispose: () => {
-					R.requestRender = undefined;
-				},
-				invalidate() {},
-				render(width: number): string[] {
-					const t = R.thresholds;
-					const u = R.usage;
-					const level = R.level;
-					const bar = renderContextBar({
-						usedPct: t ? u.percent : null,
-						cachedPct: u.window > 0 ? (u.cachedTokens / u.window) * 100 : 0,
-						softPct: t?.softPct ?? 0,
-						warnPct: t?.warnPct ?? 0,
-						forcedPct: t?.forcedPct ?? 0,
-					});
-					const cells = bar.cells
-						.map((c) => {
-							if (c === "#") return theme.fg("success", c);
-							if (c === "=") return theme.fg("accent", c);
-							if (c === "~") return theme.fg("muted", c);
-							if (c === "!") return theme.fg("warning", c);
-							if (c === "|") return theme.fg("error", c);
-							return theme.fg("dim", c);
-						})
-						.join("");
-					const problem = inert();
-					const tag = statusTag(ctx);
-					const left = theme.fg("dim", ` ${ctx.model?.id ?? "no-model"}`) + (R.state.cycle > 0 ? theme.fg("dim", ` · cycle ${R.state.cycle}`) : "");
-					const phase = tag ? ` ${theme.fg(problem ? "error" : locked() ? "error" : levelColor(level), tag)}` : "";
-					const right = `${theme.fg("dim", "[")}${cells}${theme.fg("dim", `] ${bar.label}`)}${phase} `;
-					const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-					return [truncateToWidth(left + pad + right, width)];
-				},
-			};
-		});
-	}
 
 	// ---------------------------------------------------------------- events
 
@@ -1074,7 +1065,6 @@ export default function selfCompact(pi: ExtensionAPI) {
 				if (current && (current.status === "pending" || current.status === "failed") && ctx.isIdle()) startCompaction(ctx, `recovery after ${event.reason}`);
 			});
 		}
-		installFooter(ctx);
 		await trackLevel(ctx);
 	};
 
@@ -1087,9 +1077,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.alive = false;
 		R.epoch += 1;
 		clearTimers();
-		if (ctx.hasUI) ctx.ui.setStatus("self-compact", undefined);
+		if (ctx.hasUI) {
+			ctx.ui.setStatus("self-compact", undefined);
+			ctx.ui.setWidget("self-compact", undefined);
+		}
 	});
-
 	pi.on("before_agent_start", async (event, ctx) => {
 		await trackLevel(ctx);
 		if (handsOff(ctx)) return undefined; // no self-compact vocabulary on disabled models
