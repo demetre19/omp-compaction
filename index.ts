@@ -152,6 +152,10 @@ interface Runtime {
 	externalCompactionActive: boolean;
 	/** Consecutive tool blocks while locked; trips the abort safety valve. */
 	lockedBlocks: number;
+	/** One-shot reentrancy guard: an abort we scheduled to cancel a nudge-continue must not schedule another. */
+	abortingForHandoff: boolean;
+	/** True once the notice guidance has been injected for the current soft-line crossing (once per crossing, not every call). */
+	guidedNotice: boolean;
 	/** Last model key thresholds were resolved against (OMP has no model_select event). */
 	lastModelKey: string;
 	/** /compact instructions captured in session_before_compact for the session.compacting prompt. */
@@ -240,6 +244,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		autoCompactionActive: false,
 		externalCompactionActive: false,
 		lockedBlocks: 0,
+		abortingForHandoff: false,
+		guidedNotice: false,
 		lastModelKey: "",
 		alive: true,
 		idleRequestEpoch: -1,
@@ -648,7 +654,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		refreshUi(ctx);
 		if (inert() || handsOff(ctx) || !R.thresholds) return;
 		const level = R.level;
-		if (level === "unknown" || level === "idle") return;
+		if (level === "unknown" || level === "idle") { R.guidedNotice = false; return; }
 		if (level === "forced" && !locked() && !activeHandoff() && (await compactable(ctx))) {
 			setLocked(true);
 			save();
@@ -677,7 +683,13 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (inert() || handsOff(ctx) || !R.thresholds || activeHandoff()) return undefined;
 		const level = locked() ? "forced" : R.level;
 		if (level === "unknown" || level === "idle") return undefined;
+		// The notice is a one-time heads-up per crossing: re-injecting it every call past the
+		// soft line hands the model fresh numbers to acknowledge each turn — fuel for OMP's
+		// unexpected-stop retry ("context noted, still waiting" spam) that also launders the
+		// repetition past the thinking-loop guard. Warning/forced stay every call: they demand action.
+		if (level === "notice" && R.guidedNotice) return undefined;
 		if (!(await compactable(ctx))) return undefined;
+		if (level === "notice") R.guidedNotice = true;
 		return renderGuidance(level);
 	}
 
@@ -979,7 +991,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			notify(ctx, `self-compact: note saved (${note.length} chars). Compaction runs when this turn ends.`, "info");
 			const at = R.usage.tokens === null ? "unknown usage" : `${R.usage.tokens.toLocaleString("en-US")} tokens (${formatPct(R.usage.percent, 1)}), level ${R.level}`;
 			return {
-				content: [{ type: "text", text: `Note saved (${note.length} chars) at ${at}. Every other tool is blocked until compaction succeeds. Stop now: compaction runs when this turn ends and your note will be returned verbatim.` }],
+				content: [{ type: "text", text: `Note saved (${note.length} chars) at ${at}. Every other tool is blocked until compaction succeeds. This turn is complete — end it with a one-line final answer (e.g. "Compacting; resuming after the handoff."). Compaction runs once the run settles and your note is returned verbatim.` }],
 				details: { handoffId: R.state.handoff.id, noteChars: note.length, cycle: R.state.cycle + 1, note, usedTokens: R.usage.tokens, usedPercent: R.usage.percent, level: R.level },
 				// Ignored by OMP today (no terminate field); harmless if upstream semantics arrive.
 				terminate: true,
@@ -1124,6 +1136,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.epoch += 1;
 		R.announcedLevel = "idle";
 		R.promptErrors.clear();
+		R.guidedNotice = false;
 		R.compactionInFlight = false;
 		R.autoCompactionActive = false;
 		R.externalCompactionActive = false;
@@ -1274,7 +1287,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			}
 			return {
 				block: true,
-				reason: `Tool "${event.toolName}" is blocked by self-compact: ${why}. Every tool except ${TOOL_NAME} is blocked until compaction succeeds. Write your note_to_self and call ${TOOL_NAME} now.`,
+				reason: `Tool "${event.toolName}" is blocked by self-compact: ${why}. Every tool except ${TOOL_NAME} is blocked until compaction succeeds. Do not call tools — end the turn with a one-line final answer; compaction runs when the run settles.`,
 			};
 		}
 		return undefined;
@@ -1284,13 +1297,31 @@ export default function selfCompact(pi: ExtensionAPI) {
 		await trackLevel(ctx);
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		await trackLevel(ctx);
+		const h = activeHandoff();
+		// A pending/failed handoff must end the run so onSettled can compact, but OMP's
+		// unexpected-stop retry schedules a continuation (willContinue) whenever the model
+		// stops with text only — which is exactly what "save the note and stop" produces.
+		// Aborting bumps promptGeneration, staling the scheduled continue; the aborted
+		// settle skips nudge/retry logic and still reaches the deferred onSettled below.
+		// Interactive sessions only: in print mode an abort exits the process before
+		// compaction can run, so print keeps the settle path (the nudge loop is bounded
+		// there by the process ending, and the note is journaled either way).
+		if (h && (h.status === "pending" || h.status === "failed") && "willContinue" in event && event.willContinue === true && ctx.mode === "tui" && !R.abortingForHandoff) {
+			R.abortingForHandoff = true;
+			setTimeout(() => {
+				R.abortingForHandoff = false;
+				if (R.alive && !ctx.isIdle()) ctx.abort();
+			}, 0);
+		}
 		if (!inert() && !handsOff(ctx) && !activeHandoff() && R.idleRequestEpoch !== R.epoch && (locked() || R.level === "warning" || R.level === "forced")) {
 			R.idleRequestEpoch = R.epoch;
 			pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
 		}
 		// OMP has no agent_settled: re-check the settle path shortly after the run ends.
+		// This timer is load-bearing: ctx.abort() suppresses session_stop hooks entirely,
+		// so after an abort this deferred onSettled is the ONLY path that starts compaction.
 		const epoch = R.epoch;
 		setTimeout(() => {
 			if (R.alive && epoch === R.epoch) void onSettled(ctx);
@@ -1380,6 +1411,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.on("session_compact", async (_event, ctx) => {
 		R.epoch += 1;
 		R.announcedLevel = "idle";
+		R.guidedNotice = false;
 		R.compactionInFlight = false;
 		R.externalCompactionActive = false;
 		const h = handoff();

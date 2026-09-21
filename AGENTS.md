@@ -4,7 +4,7 @@ This folder owns the `omp-compaction` repository: an OMP extension that lets a l
 
 ## Layout
 
-- Repo root IS the extension root: `index.ts` plus `state.ts`, `thresholds.ts`, `context-bar.ts`, `prompts.ts`, `settings.ts`, `roles.ts`, `menu.ts`, `defaults.ts`, and `prompts/` (upstream prompt files, verbatim).
+- Repo root IS the extension root: `index.ts` plus `state.ts`, `thresholds.ts`, `context-bar.ts`, `prompts.ts`, `settings.ts`, `roles.ts`, `menu.ts`, `defaults.ts`, and `prompts/` (upstream prompt files — `USER_PROMPT_SOFT_SELF_COMPACT.md` is locally modified: the "For awareness" paragraph was replaced with a do-not-acknowledge/do-not-poll directive to stop notice-acknowledgment spam; keep `BUILTIN_PROMPTS.soft` in prompts.ts in sync when editing it).
 - `upstream/self-compact-pi-agent/` — the upstream Pi clone, kept for reference and diffing. Gitignored; never commit it.
 - `self-compact.example.json` — documented settings example; the live file is `~/.omp/agent/self-compact.json` (not in this repo).
 - Remote: `https://github.com/demetre19/omp-compaction` (public, `main`).

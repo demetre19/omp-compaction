@@ -6,7 +6,7 @@
 
 The agent watches its own context gauge:
 
-- **Notice threshold** — a transient heads-up message reaches the model on the next LLM call.
+- **Notice threshold** — a transient heads-up message reaches the model once per crossing (re-armed when usage drops back below the soft line, on session recover, and after each compaction). Warning and forced guidance still inject on every call until the agent acts — they demand action; the notice doesn't.
 - **Warning threshold** — the agent is told to write a `note_to_self` and call `self_compact`.
 - **Forced threshold** — every tool except `self_compact` and `view_context` is blocked until compaction succeeds.
 
@@ -108,7 +108,7 @@ Placeholders like `{{used_tokens}}`, `{{forced_tokens}}`, `{{note_max_chars}}` a
 - `session_before_compact` has no `reason`: own compactions are recognized by an in-flight flag, native auto-compaction by the `auto_compaction_start`/`_end` pair (cancelled and deferred to the self-compact flow), anything else is a manual `/compact` and proceeds with our prompt.
 - No `session_compact_failed` event: our compactions report through `ctx.compact`'s `onError`; external compactions are tracked and a stale "compacting" handoff fails at settle time.
 - No `agent_settled`/`model_select`/`registerEntryRenderer`: `session_stop` + a deferred `agent_end` check cover settling, and phase crossings go through `ctx.ui.notify`. Model/role switches (`/model`, Ctrl+P) emit `model_changed` only on OMP's internal bus — extensions can't subscribe — so a managed 2s `ctx.setInterval` poll watches the model key and repaints the gauge, re-reads `self-compact.json`, and re-resolves thresholds against the new window on change.
-- `AgentToolResult` has no `terminate`: the result tells the model to stop, and a safety valve aborts the run after several consecutive locked tool blocks.
+- `AgentToolResult` has no `terminate`: the result tells the model the turn is complete, and `agent_end` aborts the run when a handoff is pending and OMP scheduled a continuation (`willContinue`) — the abort bumps `promptGeneration`, staling the nudge-continue, and the deferred settle check starts compaction (abort suppresses `session_stop`, so that deferred `onSettled` is the only post-abort compaction path). A safety valve aborts after several consecutive locked tool blocks as backstop.
 - New in this port: `self-compact.json` settings file, `compactDisabledRoles`/`compactDisabledModels`/`enabled`, `compactReferenceWindow` (fixed-window % resolution → same absolute trigger on every model), and the `/self-compact-settings` menu.
 
 ## License
