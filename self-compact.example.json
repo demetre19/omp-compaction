@@ -4,6 +4,6 @@
 	"compactAt": "20%",
 	"compactBuffer": "5%",
 	"compactReferenceWindow": "1m",
-	"compactDisabledRoles": ["default"],
-	"compactDisabledModels": ["devin/swe-2"]
+	"compactDisabledRoles": [],
+	"compactDisabledModels": []
 }

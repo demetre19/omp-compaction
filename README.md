@@ -39,8 +39,8 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 	"compactAt": "20%",
 	"compactBuffer": "5%",
 	"compactReferenceWindow": "1m",
-	"compactDisabledRoles": ["default"],
-	"compactDisabledModels": ["devin/swe-2"]
+	"compactDisabledRoles": [],
+	"compactDisabledModels": []
 }
 ```
 
@@ -52,7 +52,7 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 | `compactBuffer` | Allowance above `compactAt` before other tools are blocked (`0` = immediate). |
 | `compactPrompt` | Literal text replacing the compaction summary prompt. |
 | `compactReferenceWindow` | Fixed window that `%` thresholds resolve against (e.g. `"1m"`). With `"1m"`, `10%`/`20%`/`5%` mean notice at 100k, warning at 200k, forced at 250k **absolute tokens on every model** — a 500k model compacts at the same ~250k mark as a 1M model, and a 250k/262k model compacts at its 90% cap (~225k/236k). Windows too small to fit the warning plus ~20k wrap headroom under the cap (~245k and below) stay hands-off. Unset = the model's own window (upstream behavior). |
-| `compactDisabledRoles` | `modelRoles` names whose resolved model never self-compacts (e.g. `default` → `devin/swe-2`). |
+| `compactDisabledRoles` | `modelRoles` names whose resolved model never self-compacts (e.g. `["default"]`). |
 | `compactDisabledModels` | `provider/model` or `provider/*` entries that never self-compact. |
 
 CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-prompt`, `--compact-disable-role`, `--compact-disable-model`, `--compact-reference-window`) override file values. Thresholds resolve against `compactReferenceWindow` (or the model's own window when unset), capped at 90% of the real window.
