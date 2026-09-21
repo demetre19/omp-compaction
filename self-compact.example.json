@@ -1,0 +1,8 @@
+{
+	"enabled": true,
+	"compactSoftAt": "10%",
+	"compactAt": "20%",
+	"compactBuffer": "10%",
+	"compactDisabledRoles": ["default"],
+	"compactDisabledModels": ["devin/swe-2"]
+}
