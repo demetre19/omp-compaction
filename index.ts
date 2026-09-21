@@ -156,6 +156,10 @@ interface Runtime {
 	alive: boolean;
 	idleRequestEpoch: number;
 	promptErrors: Set<string>;
+	/** Last hands-off reason already notified (dedup: notify once per change, not per recover). */
+	notifiedOffReason?: string;
+	/** Resolve notes already shown (dedup: the 90%-cap warning fires once per distinct note). */
+	notifiedResolveNotes: Set<string>;
 }
 
 function nowPrompt(saved?: string): string {
@@ -224,6 +228,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		alive: true,
 		idleRequestEpoch: -1,
 		promptErrors: new Set(),
+		notifiedResolveNotes: new Set(),
 	};
 
 	const flag = (name: string): string | undefined => {
@@ -374,7 +379,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (result.ok) {
 			R.thresholds = result.thresholds;
 			R.resolveError = undefined;
-			if (result.thresholds.notes.length > 0) notify(ctx, `self-compact: ${result.thresholds.notes.join(" ")}`, "warning");
+			const fresh = result.thresholds.notes.filter((n) => !R.notifiedResolveNotes.has(n));
+			for (const n of fresh) R.notifiedResolveNotes.add(n);
+			if (fresh.length > 0) notify(ctx, `self-compact: ${fresh.join(" ")}`, "warning");
 		} else {
 			R.thresholds = undefined;
 			R.resolveError = result.error;
@@ -444,8 +451,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
-		if (ctx.mode === "tui") R.requestRender?.();
-		else if (ctx.hasUI) ctx.ui.setStatus("self-compact", [contextBarText(), statusTag(ctx)].filter(Boolean).join(" "));
+		// OMP's setFooter is a no-op stub (extension-ui-controller.ts): the status-line
+		// hook segment is the live channel, in every mode that has UI.
+		if (ctx.hasUI) ctx.ui.setStatus("self-compact", [contextBarText(), statusTag(ctx)].filter(Boolean).join(" "));
+		R.requestRender?.();
 	}
 
 	// -------------------------------------------------------- compaction checks
@@ -1010,13 +1019,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.externalCompactionActive = false;
 		R.lockedBlocks = 0;
 		R.lastModelKey = "";
-		R.searchDirs = promptSearchDirs(ctx.cwd, EXTENSION_DIR);
-		loadSettings(ctx.cwd);
 		resolve(ctx);
 		const problem = inert();
 		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Every tool is blocked until the flags are fixed.`, "error");
 		const off = handsOffReason(ctx);
-		if (off && ctx.hasUI) ctx.ui.notify(`self-compact: ${off} — hands-off for this session (native compaction still applies).`, "info");
+		if (off !== R.notifiedOffReason) {
+			R.notifiedOffReason = off;
+			if (off && ctx.hasUI) ctx.ui.notify(`self-compact: ${off} — hands-off for this session (native compaction still applies).`, "info");
+		}
 
 		const recovered = recoverState(ctx.sessionManager.getBranch() as EntryLike[]);
 		R.state = recovered.state;
@@ -1067,10 +1077,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.on("session_tree", async (_event, ctx) => recover({ reason: "tree" }, ctx));
 	pi.on("session_branch", async (_event, ctx) => recover({ reason: "branch" }, ctx));
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		R.alive = false;
 		R.epoch += 1;
 		clearTimers();
+		if (ctx.hasUI) ctx.ui.setStatus("self-compact", undefined);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
