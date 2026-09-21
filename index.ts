@@ -62,9 +62,10 @@ import {
 	NOTE_MAX_CHARS,
 	promptSearchDirs,
 	renderTemplate,
+	resolveCompactionPrompt,
 	type TemplateValues,
 } from "./prompts.ts";
-import { loadSettingsFile, settingsWritePath, writeSettingsFile } from "./settings.ts";
+import { loadSettingsFile, settingsSearchPaths, settingsWritePath, writeSettingsFile } from "./settings.ts";
 import { isModelDisabled, loadModelRoles, resolveDisabledModels, type DisabledModels } from "./roles.ts";
 import { runSettingsMenu, type MenuValues } from "./menu.ts";
 import {
@@ -160,6 +161,8 @@ interface Runtime {
 	notifiedOffReason?: string;
 	/** Resolve notes already shown (dedup: the 90%-cap warning fires once per distinct note). */
 	notifiedResolveNotes: Set<string>;
+	/** True once loadSettings has run; print mode never fires session_start, so refreshUi loads lazily. */
+	settingsLoaded: boolean;
 }
 
 function nowPrompt(saved?: string): string {
@@ -229,6 +232,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		idleRequestEpoch: -1,
 		promptErrors: new Set(),
 		notifiedResolveNotes: new Set(),
+		settingsLoaded: false,
 	};
 
 	const flag = (name: string): string | undefined => {
@@ -243,9 +247,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (typeof value === "string") return value.split(",").map((s) => s.trim()).filter(Boolean);
 		return [];
 	};
-
-	/** CLI flag values are applied after extensions load, so settings are read at session start. */
 	function loadSettings(cwd: string) {
+		R.settingsLoaded = true;
 		const file = loadSettingsFile(cwd);
 		R.settingsFile = file.source;
 		const softFlag = flag("compact-soft-at");
@@ -443,6 +446,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 	}
 
 	function refreshUi(ctx: ExtensionContext) {
+		// session_start doesn't fire in print mode: load settings lazily on first refresh.
+		if (!R.settingsLoaded) loadSettings(ctx.cwd);
 		// OMP has no model_select event: a changed model key re-resolves the thresholds lazily.
 		const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
 		if (modelKey !== R.lastModelKey) {
@@ -714,7 +719,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const fmt = (n: number) => n.toLocaleString("en-US");
 		const problem = inert();
 		const lines: string[] = ["self-compact info"];
-		lines.push(`settings file: ${R.settingsFile ?? "(none — using defaults)"}`);
+		lines.push(`settings file: ${R.settingsFile ?? "(none — using defaults)"}${R.settingsFile ? "" : ` [searched: ${settingsSearchPaths(ctx.cwd).join(" | ")}]`}`);
 		lines.push(`settings: compactSoftAt ${R.specs.softAt} (${R.sources.softAt}), compactAt ${R.specs.at} (${R.sources.at}), compactBuffer ${R.specs.buffer} (${R.sources.buffer}), compactPrompt ${R.compactPromptFlag ? `flag (${R.compactPromptFlag.length} chars)` : R.compactPromptFile ? `file (${R.compactPromptFile.length} chars)` : "unset"}, referenceWindow ${R.referenceWindow !== undefined ? `${fmt(R.referenceWindow)} tokens` : "model's own"}`);
 		const off = handsOffReason(ctx);
 		if (off) lines.push(`OFF: ${off} — extension is hands-off for this session`);
@@ -1019,6 +1024,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.externalCompactionActive = false;
 		R.lockedBlocks = 0;
 		R.lastModelKey = "";
+		loadSettings(ctx.cwd);
 		resolve(ctx);
 		const problem = inert();
 		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Every tool is blocked until the flags are fixed.`, "error");
