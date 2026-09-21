@@ -153,6 +153,8 @@ interface Runtime {
 	deliveryTimer?: ReturnType<typeof setTimeout>;
 	/** Deferred session-start work (resume nudge or pending-note compaction); cancelled on shutdown / tree switch. */
 	recoveryTimer?: ReturnType<typeof setTimeout>;
+	/** TUI poll that repaints the gauge when the model/role changed without an event (OMP has no model_select). */
+	modelPollTimer?: ReturnType<typeof setInterval>;
 	alive: boolean;
 	idleRequestEpoch: number;
 	promptErrors: Set<string>;
@@ -358,6 +360,21 @@ export default function selfCompact(pi: ExtensionAPI) {
 			clearTimeout(R[key]);
 			R[key] = undefined;
 		}
+		clearInterval(R.modelPollTimer);
+		R.modelPollTimer = undefined;
+	}
+
+	/** OMP has no model_select/model_changed extension event: poll the model key so a /model or
+	 *  Ctrl+P switch repaints the gauge and re-resolves thresholds without waiting for the next
+	 *  agent event. Uses ctx.setInterval — managed, error-isolated, auto-cleared on shutdown. */
+	function startModelPoll(ctx: ExtensionContext) {
+		if (ctx.mode !== "tui" || R.modelPollTimer) return;
+		const epoch = R.epoch;
+		R.modelPollTimer = ctx.setInterval(() => {
+			if (!R.alive || epoch !== R.epoch) { ctx.clearTimer(R.modelPollTimer); R.modelPollTimer = undefined; return; }
+			const key = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+			if (key !== R.lastModelKey) refreshUi(ctx);
+		}, 2000);
 	}
 
 	/** Run `fn` after `delayMs` only if the session epoch is unchanged and the runtime is alive. */
@@ -381,9 +398,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (result.ok) {
 			R.thresholds = result.thresholds;
 			R.resolveError = undefined;
-			const fresh = result.thresholds.notes.filter((n) => !R.notifiedResolveNotes.has(n));
-			for (const n of fresh) R.notifiedResolveNotes.add(n);
-			if (fresh.length > 0) notify(ctx, `self-compact: ${fresh.join(" ")}`, "warning");
+			// Notes (e.g. the 90% cap) are informational, not warnings — they live in
+			// /self-compact-info. Notifying on every resolve spams the transcript.
 		} else {
 			R.thresholds = undefined;
 			R.resolveError = result.error;
@@ -447,10 +463,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 	function refreshUi(ctx: ExtensionContext) {
 		// session_start doesn't fire in print mode: load settings lazily on first refresh.
 		if (!R.settingsLoaded) loadSettings(ctx.cwd);
-		// OMP has no model_select event: a changed model key re-resolves the thresholds lazily.
+		// OMP has no model_select event: a changed model key re-reads settings (role/model
+		// disables may target the new model) and re-resolves thresholds against its window.
 		const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
 		if (modelKey !== R.lastModelKey) {
 			R.lastModelKey = modelKey;
+			loadSettings(ctx.cwd);
 			resolve(ctx);
 		}
 		R.usage = snapshotUsage(ctx);
@@ -1067,6 +1085,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 				if (current && (current.status === "pending" || current.status === "failed") && ctx.isIdle()) startCompaction(ctx, `recovery after ${event.reason}`);
 			});
 		}
+		startModelPoll(ctx);
 		await trackLevel(ctx);
 	};
 
