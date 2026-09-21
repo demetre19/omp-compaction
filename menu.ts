@@ -7,7 +7,7 @@
  * hands-off without a restart.
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { validateSpecs, SPEC_HELP, type ThresholdSpecs } from "./thresholds.ts";
+import { parseTokenSpec, validateSpecs, SPEC_HELP, type ThresholdSpecs } from "./thresholds.ts";
 
 /** Effective values as the menu displays them (file values merged over defaults). */
 export interface MenuValues {
@@ -16,6 +16,7 @@ export interface MenuValues {
 	compactAt: string;
 	compactBuffer: string;
 	compactPrompt?: string;
+	compactReferenceWindow?: string;
 	compactDisabledRoles: string[];
 	compactDisabledModels: string[];
 }
@@ -46,6 +47,7 @@ export async function runSettingsMenu(ctx: ExtensionCommandContext, deps: Settin
 			{ label: `Notice threshold: ${v.compactSoftAt}`, description: `First heads-up to the agent. ${SPEC_HELP}` },
 			{ label: `Warning threshold: ${v.compactAt}`, description: "Agent is asked to write its note and compact." },
 			{ label: `Forced buffer: ${v.compactBuffer}`, description: "Allowance above the warning line before every other tool is blocked." },
+			{ label: `Reference window: ${v.compactReferenceWindow ?? "model's own"}`, description: "Fixed window % thresholds resolve against (e.g. 1m): every model compacts at the same absolute tokens; smaller windows stay hands-off." },
 			{ label: `Disabled roles: ${v.compactDisabledRoles.join(", ") || "none"}`, description: "modelRoles names whose model never self-compacts (e.g. default → devin/swe-2)." },
 			{ label: `Disabled models: ${v.compactDisabledModels.join(", ") || "none"}`, description: "provider/model or provider/* entries that never self-compact." },
 			{ label: `Compaction prompt: ${v.compactPrompt ? `${v.compactPrompt.length} chars (custom)` : "default file"}`, description: "Literal text replacing the compaction summary prompt." },
@@ -64,6 +66,20 @@ export async function runSettingsMenu(ctx: ExtensionCommandContext, deps: Settin
 			await editSpec(ctx, deps, "compactAt", "Warning threshold", v);
 		} else if (choice.startsWith("Forced buffer:")) {
 			await editSpec(ctx, deps, "compactBuffer", "Forced buffer", v);
+		} else if (choice.startsWith("Reference window:")) {
+			const text = await ctx.ui.input("Reference window for % thresholds — token count (1m, 500k) or empty for the model's own", v.compactReferenceWindow ?? "");
+			if (text === undefined) continue;
+			const trimmed = text.trim();
+			if (trimmed) {
+				try {
+					const parsed = parseTokenSpec(trimmed, "compactReferenceWindow");
+					if (parsed.kind !== "tokens") throw new Error("must be a token count, not a percentage");
+				} catch (error) {
+					ctx.ui.notify(`self-compact: ${error instanceof Error ? error.message : String(error)}`, "error");
+					continue;
+				}
+			}
+			report(ctx, deps.apply({ compactReferenceWindow: trimmed === "" ? null : trimmed }));
 		} else if (choice.startsWith("Disabled roles:")) {
 			await editRoles(ctx, deps, v);
 		} else if (choice.startsWith("Disabled models:")) {

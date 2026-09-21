@@ -115,11 +115,14 @@ export function pctOf(tokens: number, window: number): number {
  * - forced = min(warn + buffer, cap) where cap = floor(0.9 * window)
  * - explicit settings that violate soft <= warn <= cap are rejected
  * - defaults that do not fit a small window are clamped with a note
+ * - options.referenceWindow: percentage specs resolve against this fixed window instead of the
+ *   model's own, so "20%" means the same absolute tokens on every model (e.g. 200k with a 1M
+ *   reference). Models whose window cannot fit warn+buffer stay hands-off (checked by the caller).
  */
 export function resolveThresholds(
 	specs: ThresholdSpecs,
 	contextWindow: number,
-	options: { fromDefaults?: boolean } = {},
+	options: { fromDefaults?: boolean; referenceWindow?: number } = {},
 ): ResolveResult {
 	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
 		return { ok: false, error: `Model context window is unknown (${contextWindow}); cannot resolve thresholds.` };
@@ -131,9 +134,11 @@ export function resolveThresholds(
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
 	const capTokens = Math.floor(HARD_CAP_FRACTION * contextWindow);
-	let softTokens = toTokens(parsed.soft, contextWindow);
-	let warnTokens = toTokens(parsed.warn, contextWindow);
-	const bufferTokens = toTokens(parsed.buffer, contextWindow);
+	// Percentages resolve against the fixed reference window (defaults to the model's own).
+	const specWindow = options.referenceWindow && options.referenceWindow > 0 ? options.referenceWindow : contextWindow;
+	let softTokens = toTokens(parsed.soft, specWindow);
+	let warnTokens = toTokens(parsed.warn, specWindow);
+	const bufferTokens = toTokens(parsed.buffer, specWindow);
 	const notes: string[] = [];
 	let clamped = false;
 

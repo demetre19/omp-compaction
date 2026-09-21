@@ -38,6 +38,7 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 	"compactSoftAt": "10%",
 	"compactAt": "20%",
 	"compactBuffer": "10%",
+	"compactReferenceWindow": "1m",
 	"compactDisabledRoles": ["default"],
 	"compactDisabledModels": ["devin/swe-2"]
 }
@@ -50,10 +51,13 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 | `compactAt` | Warning threshold — agent asked to write its note and compact. |
 | `compactBuffer` | Allowance above `compactAt` before other tools are blocked (`0` = immediate). |
 | `compactPrompt` | Literal text replacing the compaction summary prompt. |
+| `compactReferenceWindow` | Fixed window that `%` thresholds resolve against (e.g. `"1m"`). With `"1m"`, `10%`/`20%`/`10%` mean notice at 100k, warning at 200k, forced at 300k **absolute tokens on every model** — so a 500k model compacts at the same ~250k mark as a 1M model, and a 250k/262k model whose window can't fit the forced threshold stays hands-off. Unset = the model's own window (upstream behavior). |
 | `compactDisabledRoles` | `modelRoles` names whose resolved model never self-compacts (e.g. `default` → `devin/swe-2`). |
 | `compactDisabledModels` | `provider/model` or `provider/*` entries that never self-compact. |
 
-CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-prompt`, `--compact-disable-role`, `--compact-disable-model`) override file values. Thresholds resolve against the active model's context window, capped at 90%.
+CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-prompt`, `--compact-disable-role`, `--compact-disable-model`, `--compact-reference-window`) override file values. Thresholds resolve against `compactReferenceWindow` (or the model's own window when unset), capped at 90% of the real window.
+
+**Same absolute trigger on every model.** Set `compactReferenceWindow` once and percentages become fixed token counts: `20%` of a 1M reference = 200k whether the model's window is 1M or 500k. Models too small to reach the forced threshold (warn + buffer) never self-compact — with the defaults above that's every window under ~300k.
 
 **Why disable a model?** Free or huge-window models (e.g. Devin's SWE-2 at 262k) don't need early compaction — disabling them keeps the extension fully hands-off while native compaction remains as the safety net.
 

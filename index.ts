@@ -83,6 +83,7 @@ import {
 	DEFAULT_SPECS,
 	LEVEL_ORDER,
 	levelFor,
+	parseTokenSpec,
 	resolveThresholds,
 	SPEC_HELP,
 	validateSpecs,
@@ -120,6 +121,8 @@ interface Runtime {
 	disabled: boolean;
 	/** Roles/models that never self-compact (compactDisabledRoles resolved via modelRoles + compactDisabledModels). */
 	disabledModels: DisabledModels;
+	/** Fixed window percentage specs resolve against (tokens); undefined = model's own window. */
+	referenceWindow?: number;
 	settingsFile?: string;
 	sources: { softAt: SpecSource; at: SpecSource; buffer: SpecSource };
 	fromDefaults: boolean;
@@ -199,6 +202,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerFlag("compact-prompt", { description: "Literal text that replaces the compaction summary prompt.", type: "string" });
 	pi.registerFlag("compact-disable-role", { description: "modelRoles name whose model never self-compacts (repeatable or comma-separated).", type: "string" });
 	pi.registerFlag("compact-disable-model", { description: "provider/model (or provider/*) that never self-compacts (repeatable or comma-separated).", type: "string" });
+	pi.registerFlag("compact-reference-window", { description: "Fixed window that percentage thresholds resolve against (e.g. 1m): every model compacts at the same absolute tokens; windows too small for warn+buffer stay hands-off.", type: "string" });
 
 	const R: Runtime = {
 		specs: { ...DEFAULT_SPECS },
@@ -264,6 +268,18 @@ export default function selfCompact(pi: ExtensionAPI) {
 			cwd,
 		);
 		R.configError = file.error;
+		const refSpec = flag("compact-reference-window") ?? file.values.compactReferenceWindow;
+		R.referenceWindow = undefined;
+		if (refSpec !== undefined) {
+			try {
+				const parsed = parseTokenSpec(refSpec, "compactReferenceWindow");
+				if (parsed.kind !== "tokens") throw new Error(`Invalid compactReferenceWindow: "${refSpec}" must be a token count, not a percentage.`);
+				R.referenceWindow = parsed.value;
+			} catch (error) {
+				R.configError = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`[self-compact] REJECTED: ${R.configError}\n`);
+			}
+		}
 		try {
 			for (const name of ["compact-soft-at", "compact-at", "compact-buffer", "compact-prompt"]) {
 				const value = pi.getFlag(name);
@@ -276,9 +292,22 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 	}
 
-	/** Fully hands-off: master switch off, or the session's current model is disabled by role/model. */
+	/** The uncapped forced target: warn + buffer before the 90%-of-window clamp. */
+	function forcedTarget(): number | undefined {
+		const t = R.thresholds;
+		return t ? t.warnTokens + t.bufferTokens : undefined;
+	}
+
+	/** True when the model's window cannot even reach the forced threshold (e.g. a 262k window with a 300k target). */
+	function windowTooSmall(ctx: ExtensionContext): boolean {
+		const target = forcedTarget();
+		const window = ctx.model?.contextWindow ?? 0;
+		return target !== undefined && window > 0 && window <= target;
+	}
+
+	/** Fully hands-off: master switch off, model disabled by role/model, or window too small for the thresholds. */
 	function handsOff(ctx: ExtensionContext): boolean {
-		return R.disabled || isModelDisabled(ctx.model, R.disabledModels);
+		return R.disabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall(ctx);
 	}
 
 	/** Why the extension is hands-off right now, for display. */
@@ -288,6 +317,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (key && isModelDisabled(ctx.model, R.disabledModels)) {
 			const role = Object.entries(R.disabledModels.roles).find(([, k]) => k === key)?.[0];
 			return `model ${key} is disabled${role ? ` (role ${role})` : ""}`;
+		}
+		if (windowTooSmall(ctx)) {
+			return `window ${(ctx.model?.contextWindow ?? 0).toLocaleString("en-US")} tokens is smaller than the forced threshold ${forcedTarget()!.toLocaleString("en-US")} tokens`;
 		}
 		return undefined;
 	}
@@ -324,7 +356,6 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/** Run `fn` after `delayMs` only if the session epoch is unchanged and the runtime is alive. */
 	function deferInEpoch(key: "retryTimer" | "recoveryTimer", delayMs: number, fn: () => void) {
-		clearTimeout(R[key]);
 		const epoch = R.epoch;
 		R[key] = setTimeout(() => {
 			R[key] = undefined;
@@ -340,7 +371,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	}
 
 	function resolve(ctx: ExtensionContext) {
-		const result = resolveThresholds(R.specs, ctx.model?.contextWindow ?? 0, { fromDefaults: R.fromDefaults });
+		const result = resolveThresholds(R.specs, ctx.model?.contextWindow ?? 0, { fromDefaults: R.fromDefaults, referenceWindow: R.referenceWindow });
 		if (result.ok) {
 			R.thresholds = result.thresholds;
 			R.resolveError = undefined;
@@ -676,7 +707,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const problem = inert();
 		const lines: string[] = ["self-compact info"];
 		lines.push(`settings file: ${R.settingsFile ?? "(none — using defaults)"}`);
-		lines.push(`settings: compactSoftAt ${R.specs.softAt} (${R.sources.softAt}), compactAt ${R.specs.at} (${R.sources.at}), compactBuffer ${R.specs.buffer} (${R.sources.buffer}), compactPrompt ${R.compactPromptFlag ? `flag (${R.compactPromptFlag.length} chars)` : R.compactPromptFile ? `file (${R.compactPromptFile.length} chars)` : "unset"}`);
+		lines.push(`settings: compactSoftAt ${R.specs.softAt} (${R.sources.softAt}), compactAt ${R.specs.at} (${R.sources.at}), compactBuffer ${R.specs.buffer} (${R.sources.buffer}), compactPrompt ${R.compactPromptFlag ? `flag (${R.compactPromptFlag.length} chars)` : R.compactPromptFile ? `file (${R.compactPromptFile.length} chars)` : "unset"}, referenceWindow ${R.referenceWindow !== undefined ? `${fmt(R.referenceWindow)} tokens` : "model's own"}`);
 		const off = handsOffReason(ctx);
 		if (off) lines.push(`OFF: ${off} — extension is hands-off for this session`);
 		const dm = R.disabledModels;
@@ -753,6 +784,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 			pending_note: h ? { status: h.status, chars: h.note.length } : null,
 			compaction_cycles: R.state.cycle,
 			settings_error: inert() ?? null,
+			self_compact_disabled: handsOff(ctx),
+			disabled_reason: handsOffReason(ctx) ?? null,
 		};
 	}
 
@@ -893,6 +926,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 					compactAt: R.specs.at,
 					compactBuffer: R.specs.buffer,
 					compactPrompt: R.compactPromptFile,
+					compactReferenceWindow: R.referenceWindow !== undefined ? String(R.referenceWindow) : undefined,
 					compactDisabledRoles: Object.keys(R.disabledModels.roles).concat(R.disabledModels.unknownRoles),
 					compactDisabledModels: R.disabledModels.direct,
 				}),

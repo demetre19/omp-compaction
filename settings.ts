@@ -13,6 +13,9 @@
  *   compactAt             — warning threshold: ask the agent to write its note and compact
  *   compactBuffer         — allowance above compactAt before other tools are blocked
  *   compactPrompt         — literal text replacing the compaction summary prompt
+ *   compactReferenceWindow — fixed window percentage specs resolve against ("1m"): every model
+ *                            compacts at the same absolute tokens; windows too small to fit
+ *                            warn+buffer stay hands-off. Unset = the model's own window (upstream).
  *   compactDisabledRoles  — modelRoles names whose resolved model never self-compacts
  *   compactDisabledModels — "provider/model" or "provider/*" entries that never self-compact
  */
@@ -26,6 +29,7 @@ export interface FileSettings {
 	compactAt?: string;
 	compactBuffer?: string;
 	compactPrompt?: string;
+	compactReferenceWindow?: string;
 	compactDisabledRoles?: string[];
 	compactDisabledModels?: string[];
 }
@@ -50,8 +54,7 @@ export function settingsSearchPaths(cwd: string): string[] {
 	];
 	return paths.filter((p, index) => paths.indexOf(p) === index);
 }
-
-type StringKey = "compactSoftAt" | "compactAt" | "compactBuffer" | "compactPrompt";
+type StringKey = "compactSoftAt" | "compactAt" | "compactBuffer" | "compactPrompt" | "compactReferenceWindow";
 type BoolKey = "enabled";
 type ListKey = "compactDisabledRoles" | "compactDisabledModels";
 
@@ -67,6 +70,8 @@ const KEY_ALIASES: Record<string, StringKey | BoolKey | ListKey> = {
 	compactPrompt: "compactPrompt",
 	"compact-prompt": "compactPrompt",
 	compactDisabledRoles: "compactDisabledRoles",
+	compactReferenceWindow: "compactReferenceWindow",
+	"compact-reference-window": "compactReferenceWindow",
 	"compact-disabled-roles": "compactDisabledRoles",
 	compactDisabledModels: "compactDisabledModels",
 	"compact-disabled-models": "compactDisabledModels",
