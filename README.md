@@ -12,16 +12,20 @@ The agent watches its own context gauge:
 
 `self_compact({ note_to_self })` saves the note, ends the run, and compacts once the agent is idle — using a summary prompt you control. The note comes back **verbatim** as the next message, so the agent resumes its `NEXT ACTION` with no human message and no lost intent. Failures keep the note and the lock, retry automatically (up to 3×), and survive reloads, tree navigation, and crashes.
 
-A one-line footer replaces the default: model id on the left, a 20-cell context bar with threshold markers and phase tag on the right.
+A colored one-line gauge sits below the editor: a 20-cell context bar (`#` cached, `=` used, `-` free; `~`/`!`/`|` threshold markers) whose fill heats up with the phase — green at idle, accent at notice, orange at warning, red at forced — plus used/window tokens, the phase tag, and the threshold legend. OMP's `setFooter` is a no-op stub, so the gauge renders through `setWidget` (ANSI-preserving); non-TUI modes fall back to a plain `setStatus` line.
 
 ## Install
 
 ```bash
-# Global (every session):
+# Global (every session) — clone into the extensions dir, or symlink a checkout:
 git clone https://github.com/demetre19/omp-compaction ~/.omp/agent/extensions/omp-compaction
+# or: ln -s /path/to/omp-compaction ~/.omp/agent/extensions/omp-compaction
 
-# Or per-invocation (testing):
+# Per-invocation (testing):
 omp -e /path/to/omp-compaction
+
+# Auto-load when cwd is the repo (committed .omp/config.yml):
+cd omp-compaction && omp
 ```
 
 Then configure via `~/.omp/agent/self-compact.json` (created on first write, or copy the example below) — or just run `/self-compact-settings` inside OMP.
