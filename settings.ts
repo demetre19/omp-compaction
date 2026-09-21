@@ -18,10 +18,19 @@
  *                            warn+buffer stay hands-off. Unset = the model's own window (upstream).
  *   compactDisabledRoles  — modelRoles names whose resolved model never self-compacts
  *   compactDisabledModels — "provider/model" or "provider/*" entries that never self-compact
+ *   compactModelThresholds — per-model threshold overrides:
+ *                            { "provider/model" | "provider/*": { compactSoftAt?, compactAt?, compactBuffer? } }
+ *                            Exact keys beat provider wildcards; CLI flags still win over everything.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+
+export interface ModelThresholdOverride {
+	compactSoftAt?: string;
+	compactAt?: string;
+	compactBuffer?: string;
+}
 
 export interface FileSettings {
 	enabled?: boolean;
@@ -32,6 +41,7 @@ export interface FileSettings {
 	compactReferenceWindow?: string;
 	compactDisabledRoles?: string[];
 	compactDisabledModels?: string[];
+	compactModelThresholds?: Record<string, ModelThresholdOverride>;
 }
 
 export interface LoadedSettings {
@@ -57,9 +67,10 @@ export function settingsSearchPaths(cwd: string): string[] {
 type StringKey = "compactSoftAt" | "compactAt" | "compactBuffer" | "compactPrompt" | "compactReferenceWindow";
 type BoolKey = "enabled";
 type ListKey = "compactDisabledRoles" | "compactDisabledModels";
+type MapKey = "compactModelThresholds";
 
 /** camelCase keys plus the dashed CLI spellings, so either style works in the file. */
-const KEY_ALIASES: Record<string, StringKey | BoolKey | ListKey> = {
+const KEY_ALIASES: Record<string, StringKey | BoolKey | ListKey | MapKey> = {
 	enabled: "enabled",
 	compactSoftAt: "compactSoftAt",
 	"compact-soft-at": "compactSoftAt",
@@ -75,12 +86,24 @@ const KEY_ALIASES: Record<string, StringKey | BoolKey | ListKey> = {
 	"compact-disabled-roles": "compactDisabledRoles",
 	compactDisabledModels: "compactDisabledModels",
 	"compact-disabled-models": "compactDisabledModels",
+	compactModelThresholds: "compactModelThresholds",
+	"compact-model-thresholds": "compactModelThresholds",
 };
 
 const BOOL_KEYS: Record<string, BoolKey> = { enabled: "enabled" };
 const LIST_KEYS: Record<string, ListKey> = {
 	compactDisabledRoles: "compactDisabledRoles",
 	compactDisabledModels: "compactDisabledModels",
+};
+const MAP_KEYS: Record<string, MapKey> = { compactModelThresholds: "compactModelThresholds" };
+/** Keys allowed inside one compactModelThresholds entry (camelCase or dashed spelling). */
+const OVERRIDE_KEYS: Record<string, true> = {
+	compactSoftAt: true,
+	compactAt: true,
+	compactBuffer: true,
+	"compact-soft-at": true,
+	"compact-at": true,
+	"compact-buffer": true,
 };
 
 export function loadSettingsFile(cwd: string): LoadedSettings {
@@ -115,6 +138,29 @@ export function loadSettingsFile(cwd: string): LoadedSettings {
 					return { values: {}, source: path, error: `${path}: "${key}" must be an array of strings.` };
 				}
 				values[canonical as ListKey] = value as string[];
+			} else if (canonical in MAP_KEYS) {
+				if (!value || typeof value !== "object" || Array.isArray(value)) {
+					return { values: {}, source: path, error: `${path}: "${key}" must be an object mapping "provider/model" to threshold overrides.` };
+				}
+				const map: Record<string, ModelThresholdOverride> = {};
+				for (const [pattern, override] of Object.entries(value as Record<string, unknown>)) {
+					if (!override || typeof override !== "object" || Array.isArray(override)) {
+						return { values: {}, source: path, error: `${path}: "${key}"."${pattern}" must be an object like { "compactAt": "60%" }.` };
+					}
+					const entry: ModelThresholdOverride = {};
+					for (const [oKey, oValue] of Object.entries(override)) {
+						if (!OVERRIDE_KEYS[oKey]) {
+							return { values: {}, source: path, error: `${path}: "${key}"."${pattern}" has unknown key "${oKey}" (allowed: compactSoftAt, compactAt, compactBuffer).` };
+						}
+						if (typeof oValue !== "string") {
+							return { values: {}, source: path, error: `${path}: "${key}"."${pattern}"."${oKey}" must be a string like "60%" or "500k".` };
+						}
+						const camel = oKey.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()) as keyof ModelThresholdOverride;
+						entry[camel] = oValue;
+					}
+					map[pattern] = entry;
+				}
+				values[canonical as MapKey] = map;
 			} else {
 				if (typeof value !== "string") {
 					return { values: {}, source: path, error: `${path}: "${key}" must be a string, got ${typeof value}.` };

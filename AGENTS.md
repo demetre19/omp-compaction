@@ -12,11 +12,11 @@ This folder owns the `omp-compaction` repository: an OMP extension that lets a l
 ## Boundaries
 
 - The extension is NOT installed globally. `~/.omp/agent/extensions/` must not contain it unless the user explicitly installs it. Test per-invocation: `omp -e /Users/apple/Documents/UNCLUTTER-NEW/CLAUDE-DEV/omp-compaction`.
-- `~/.omp/agent/self-compact.json` is the live settings file; it seeds `compactDisabledRoles: ["default"]` and `compactDisabledModels: ["devin/swe-2"]` so SWE-2 sessions are hands-off.
+- `~/.omp/agent/self-compact.json` is the live settings file; it currently sets `compactReferenceWindow: "1m"` so every model compacts at the same absolute tokens (~200k warning). `compactDisabledRoles`/`compactDisabledModels` are empty — nothing is disabled by default.
 - Credit upstream (disler/self-compact-pi-agent, MIT) in README and LICENSE; keep the copyright lines intact.
 
 ## Verification
 
-- Syntax: `bun build index.ts menu.ts roles.ts settings.ts prompts.ts state.ts thresholds.ts context-bar.ts defaults.ts --outdir /tmp/sc-build --external '@earendil-works/*' --external 'typebox'` must exit 0.
+- Syntax: `bun build index.ts menu.ts roles.ts settings.ts prompts.ts state.ts thresholds.ts context-bar.ts defaults.ts --outdir /tmp/sc-build --external '@earendil-works/*' --external 'typebox' --target bun` must exit 0 (Bun ≥1.3 defaults to browser target without `--target bun` and fails on `node:url`).
 - Load: `cd /tmp/<scratch> && omp -p -e <this folder> "reply with exactly: ok"` must print no `Extension error`.
 - Full behavior (menu, compaction cycle) requires an interactive TUI session; verify on the actual surface before claiming it works.

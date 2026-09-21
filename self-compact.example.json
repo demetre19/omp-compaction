@@ -5,5 +5,9 @@
 	"compactBuffer": "5%",
 	"compactReferenceWindow": "1m",
 	"compactDisabledRoles": [],
-	"compactDisabledModels": []
+	"compactDisabledModels": [],
+	"compactModelThresholds": {
+		"devin/claude-fable-5-1": { "compactAt": "60%", "compactBuffer": "10%" },
+		"devin/*": { "compactAt": "40%" }
+	}
 }

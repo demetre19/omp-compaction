@@ -32,7 +32,9 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 
 ## Settings
 
-`/self-compact-settings` opens an interactive menu: enable/disable, thresholds, disabled roles (checkbox list over your `modelRoles`), disabled models, and the compaction prompt. Changes write `self-compact.json` and apply **live** — including turning the extension off mid-session.
+`/self-compact-settings` opens an interactive menu: enable/disable, a session-only toggle, thresholds (preset picker), disabled roles (checkbox list over your `modelRoles`), disabled models, and the compaction prompt. Changes write `self-compact.json` and apply **live** — including turning the extension off mid-session.
+
+**Quick toggle:** `/self-compact-toggle` (or `ctrl+shift+k`) flips self-compact off/on for the current session only — nothing is written to disk, so it's the fast way to ride out a PRD approval phase and turn protection back on after. `/self-compact-toggle off` / `on` set it explicitly. To start a run already hands-off, launch with `--compact-off`.
 
 `self-compact.json` lookup order (first file wins): `<cwd>/.omp/self-compact.json` → `<cwd>/.pi/self-compact.json` → `~/.omp/agent/self-compact.json` → `~/.pi/agent/self-compact.json`.
 
@@ -58,8 +60,9 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 | `compactReferenceWindow` | Fixed window that `%` thresholds resolve against (e.g. `"1m"`). With `"1m"`, `10%`/`20%`/`5%` mean notice at 100k, warning at 200k, forced at 250k **absolute tokens on every model** — a 500k model compacts at the same ~250k mark as a 1M model, and a 250k/262k model compacts at its 90% cap (~225k/236k). Windows too small to fit the warning plus ~20k wrap headroom under the cap (~245k and below) stay hands-off. Unset = the model's own window (upstream behavior). |
 | `compactDisabledRoles` | `modelRoles` names whose resolved model never self-compacts (e.g. `["default"]`). |
 | `compactDisabledModels` | `provider/model` or `provider/*` entries that never self-compact. |
+| `compactModelThresholds` | Per-model threshold overrides: `{ "provider/model" | "provider/*": { "compactSoftAt"?, "compactAt"?, "compactBuffer"? } }`. Exact model keys beat `provider/*` wildcards; CLI flags still win. Use it to raise the bar only on big-window models — e.g. `"devin/claude-fable-5-1": { "compactAt": "60%" }` warns at ~600k of a 1M window while every other model keeps the defaults. |
 
-CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-prompt`, `--compact-disable-role`, `--compact-disable-model`, `--compact-reference-window`) override file values. Thresholds resolve against `compactReferenceWindow` (or the model's own window when unset), capped at 90% of the real window.
+CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-prompt`, `--compact-disable-role`, `--compact-disable-model`, `--compact-reference-window`, `--compact-off`) override file values. Thresholds resolve against `compactReferenceWindow` (or the model's own window when unset), capped at 90% of the real window.
 
 **Same absolute trigger on every model.** Set `compactReferenceWindow` once and percentages become fixed token counts: `20%` of a 1M reference = 200k whether the model's window is 1M or 500k. With the defaults above, every model large enough compacts at ~250k absolute (or its 90% cap, whichever is lower); windows under ~245k never self-compact.
 
@@ -84,6 +87,7 @@ The extension intercepts native auto-compaction on engaged models (`session_befo
 | `/self-compact-info` | Settings, resolved thresholds, usage, state, prompt sources, pending note — no LLM turn. |
 | `/self-compact-now` | Ask the agent to write its note and compact now (reuses a saved note on retry). |
 | `/self-compact-settings` | Interactive settings menu (TUI). |
+| `/self-compact-toggle` | Session-only on/off switch — no file write. `ctrl+shift+k` does the same. |
 | `self_compact` (tool) | Save `note_to_self`, end the run, compact when idle, return the note verbatim. |
 | `view_context` (tool) | The agent's own view of the gauge: used tokens, percent, level, thresholds, lock state as JSON. |
 

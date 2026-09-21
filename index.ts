@@ -65,8 +65,8 @@ import {
 	resolveCompactionPrompt,
 	type TemplateValues,
 } from "./prompts.ts";
-import { loadSettingsFile, settingsSearchPaths, settingsWritePath, writeSettingsFile } from "./settings.ts";
-import { isModelDisabled, loadModelRoles, resolveDisabledModels, type DisabledModels } from "./roles.ts";
+import { loadSettingsFile, settingsSearchPaths, settingsWritePath, writeSettingsFile, type ModelThresholdOverride } from "./settings.ts";
+import { isModelDisabled, loadModelRoles, modelKey, resolveDisabledModels, type DisabledModels } from "./roles.ts";
 import { runSettingsMenu, type MenuValues } from "./menu.ts";
 import {
 	HANDOFF_TYPE,
@@ -120,8 +120,16 @@ interface Runtime {
 	compactPromptFile?: string;
 	/** Master switch from self-compact.json `enabled`; undefined = on. */
 	disabled: boolean;
+	/** --compact-off launch flag: hands-off for the whole run, toggle cannot re-enable. */
+	flagDisabled: boolean;
+	/** /self-compact-toggle (ctrl+shift+k): session-scoped, never written to disk. */
+	sessionDisabled: boolean;
 	/** Roles/models that never self-compact (compactDisabledRoles resolved via modelRoles + compactDisabledModels). */
 	disabledModels: DisabledModels;
+	/** compactModelThresholds: raw "provider/model"|"provider/*" → partial specs map from the settings file. */
+	modelThresholds: Record<string, ModelThresholdOverride>;
+	/** The compactModelThresholds pattern that produced the active specs, for display. */
+	activeThresholdOverride?: string;
 	/** Fixed window percentage specs resolve against (tokens); undefined = model's own window. */
 	referenceWindow?: number;
 	settingsFile?: string;
@@ -211,13 +219,17 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerFlag("compact-disable-role", { description: "modelRoles name whose model never self-compacts (repeatable or comma-separated).", type: "string" });
 	pi.registerFlag("compact-disable-model", { description: "provider/model (or provider/*) that never self-compacts (repeatable or comma-separated).", type: "string" });
 	pi.registerFlag("compact-reference-window", { description: "Fixed window that percentage thresholds resolve against (e.g. 1m): every model compacts at the same absolute tokens; windows too small for warn+buffer stay hands-off.", type: "string" });
+	pi.registerFlag("compact-off", { description: "Start hands-off: no guidance, no lock, native compaction untouched. Same as /self-compact-toggle off but from launch.", type: "boolean" });
 
 	const R: Runtime = {
 		specs: { ...DEFAULT_SPECS },
 		sources: { softAt: "default", at: "default", buffer: "default" },
 		fromDefaults: true,
 		disabled: false,
+		flagDisabled: false,
+		sessionDisabled: false,
 		disabledModels: { keys: {}, roles: {}, unknownRoles: [], direct: [] },
+		modelThresholds: {},
 		searchDirs: promptSearchDirs(process.cwd(), EXTENSION_DIR),
 		usage: { tokens: null, percent: null, cachedTokens: 0, window: 0 },
 		level: "unknown",
@@ -271,11 +283,13 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.compactPromptFlag = flag("compact-prompt");
 		R.compactPromptFile = file.values.compactPrompt;
 		R.disabled = file.values.enabled === false;
+		R.flagDisabled = pi.getFlag("compact-off") === true;
 		R.disabledModels = resolveDisabledModels(
 			[...(file.values.compactDisabledRoles ?? []), ...flagList("compact-disable-role")],
 			[...(file.values.compactDisabledModels ?? []), ...flagList("compact-disable-model")],
 			cwd,
 		);
+		R.modelThresholds = file.values.compactModelThresholds ?? {};
 		R.configError = file.error;
 		const refSpec = flag("compact-reference-window") ?? file.values.compactReferenceWindow;
 		R.referenceWindow = undefined;
@@ -295,6 +309,19 @@ export default function selfCompact(pi: ExtensionAPI) {
 				if (typeof value === "string" && !value.trim()) throw new Error(`--${name} must not be empty.`);
 			}
 			validateSpecs(R.specs);
+			// Per-model overrides: each entry's own keys must parse; cross-key ordering and the
+			// 90% cap are checked at resolve time against the real window (resolveError, model-scoped).
+			for (const [pattern, override] of Object.entries(R.modelThresholds)) {
+				try {
+					validateSpecs({
+						softAt: override.compactSoftAt ?? R.specs.softAt,
+						at: override.compactAt ?? R.specs.at,
+						buffer: override.compactBuffer ?? R.specs.buffer,
+					});
+				} catch (error) {
+					throw new Error(`compactModelThresholds["${pattern}"]: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
 		} catch (error) {
 			R.configError = error instanceof Error ? error.message : String(error);
 			process.stderr.write(`[self-compact] REJECTED: ${R.configError}\n`);
@@ -312,14 +339,16 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return t !== undefined && t.warnTokens + MIN_WRAP_TOKENS >= t.capTokens;
 	}
 
-	/** Fully hands-off: master switch off, model disabled by role/model, or window too small for the thresholds. */
+	/** Fully hands-off: master switch off, launch flag, session toggle, model disabled by role/model, or window too small for the thresholds. */
 	function handsOff(ctx: ExtensionContext): boolean {
-		return R.disabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
+		return R.disabled || R.flagDisabled || R.sessionDisabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
 	}
 
 	/** Why the extension is hands-off right now, for display. */
 	function handsOffReason(ctx: ExtensionContext): string | undefined {
 		if (R.disabled) return "disabled in self-compact.json";
+		if (R.flagDisabled) return "disabled by --compact-off";
+		if (R.sessionDisabled) return "disabled for this session (/self-compact-toggle or ctrl+shift+k to re-enable)";
 		const key = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 		if (key && isModelDisabled(ctx.model, R.disabledModels)) {
 			const role = Object.entries(R.disabledModels.roles).find(([, k]) => k === key)?.[0];
@@ -393,8 +422,34 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (!value) R.lockedBlocks = 0;
 	}
 
+	/**
+	 * Effective specs for the current model: compactModelThresholds entries whose pattern
+	 * matches ("provider/model" exact beats "provider/*") replace the file/default values
+	 * key-by-key; CLI flags always win. Returns the specs plus which pattern applied.
+	 */
+	function effectiveSpecs(ctx: ExtensionContext): { specs: ThresholdSpecs; fromDefaults: boolean; pattern?: string } {
+		const key = modelKey(ctx.model);
+		const pattern = key ? (R.modelThresholds[key] ? key : R.modelThresholds[`${ctx.model!.provider}/*`] ? `${ctx.model!.provider}/*` : undefined) : undefined;
+		const override = pattern ? R.modelThresholds[pattern] : undefined;
+		if (!override) return { specs: R.specs, fromDefaults: R.fromDefaults };
+		const specs: ThresholdSpecs = {
+			softAt: R.sources.softAt === "flag" ? R.specs.softAt : (override.compactSoftAt ?? R.specs.softAt),
+			at: R.sources.at === "flag" ? R.specs.at : (override.compactAt ?? R.specs.at),
+			buffer: R.sources.buffer === "flag" ? R.specs.buffer : (override.compactBuffer ?? R.specs.buffer),
+		};
+		// "From defaults" means every effective spec is a shipped default: no flag, no file
+		// value, and no override. Only then may resolveThresholds clamp instead of reject.
+		const fromDefaults =
+			R.sources.softAt === "default" && override.compactSoftAt === undefined &&
+			R.sources.at === "default" && override.compactAt === undefined &&
+			R.sources.buffer === "default" && override.compactBuffer === undefined;
+		return { specs, fromDefaults, pattern };
+	}
+
 	function resolve(ctx: ExtensionContext) {
-		const result = resolveThresholds(R.specs, ctx.model?.contextWindow ?? 0, { fromDefaults: R.fromDefaults, referenceWindow: R.referenceWindow });
+		const { specs, fromDefaults, pattern } = effectiveSpecs(ctx);
+		R.activeThresholdOverride = pattern;
+		const result = resolveThresholds(specs, ctx.model?.contextWindow ?? 0, { fromDefaults, referenceWindow: R.referenceWindow });
 		if (result.ok) {
 			R.thresholds = result.thresholds;
 			R.resolveError = undefined;
@@ -402,7 +457,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			// /self-compact-info. Notifying on every resolve spams the transcript.
 		} else {
 			R.thresholds = undefined;
-			R.resolveError = result.error;
+			R.resolveError = pattern ? `compactModelThresholds["${pattern}"]: ${result.error}` : result.error;
 		}
 	}
 
@@ -773,6 +828,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const lines: string[] = ["self-compact info"];
 		lines.push(`settings file: ${R.settingsFile ?? "(none — using defaults)"}${R.settingsFile ? "" : ` [searched: ${settingsSearchPaths(ctx.cwd).join(" | ")}]`}`);
 		lines.push(`settings: compactSoftAt ${R.specs.softAt} (${R.sources.softAt}), compactAt ${R.specs.at} (${R.sources.at}), compactBuffer ${R.specs.buffer} (${R.sources.buffer}), compactPrompt ${R.compactPromptFlag ? `flag (${R.compactPromptFlag.length} chars)` : R.compactPromptFile ? `file (${R.compactPromptFile.length} chars)` : "unset"}, referenceWindow ${R.referenceWindow !== undefined ? `${fmt(R.referenceWindow)} tokens` : "model's own"}`);
+		const overrideKeys = Object.keys(R.modelThresholds);
+		if (overrideKeys.length > 0) {
+			lines.push(`model thresholds: ${overrideKeys.map((k) => `${k}=${JSON.stringify(R.modelThresholds[k])}`).join(", ")}${R.activeThresholdOverride ? ` — active: ${R.activeThresholdOverride}` : " (none active for this model)"}`);
+		}
 		const off = handsOffReason(ctx);
 		if (off) lines.push(`OFF: ${off} — extension is hands-off for this session`);
 		const dm = R.disabledModels;
@@ -799,8 +858,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 			if (h.error) lines.push(`last error: ${h.error}`);
 		}
 		const data = {
-			disabled: { master: R.disabled, roles: dm.roles, unknownRoles: dm.unknownRoles, models: dm.direct, active: off ?? null },
-			settings: { ...R.specs, compactPrompt: R.compactPromptFlag ?? R.compactPromptFile ?? null, sources: R.sources, file: R.settingsFile ?? null },
+			disabled: { master: R.disabled, flag: R.flagDisabled, session: R.sessionDisabled, roles: dm.roles, unknownRoles: dm.unknownRoles, models: dm.direct, active: off ?? null },
+			settings: { ...R.specs, compactPrompt: R.compactPromptFlag ?? R.compactPromptFile ?? null, sources: R.sources, file: R.settingsFile ?? null, modelThresholds: R.modelThresholds, activeThresholdOverride: R.activeThresholdOverride ?? null },
 			rejected: problem ?? null,
 			model,
 			thresholds: t ?? null,
@@ -987,6 +1046,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			await runSettingsMenu(ctx, {
 				values: (): MenuValues => ({
 					enabled: !R.disabled,
+					sessionDisabled: R.sessionDisabled,
 					compactSoftAt: R.specs.softAt,
 					compactAt: R.specs.at,
 					compactBuffer: R.specs.buffer,
@@ -1006,8 +1066,42 @@ export default function selfCompact(pi: ExtensionAPI) {
 					refreshUi(ctx);
 					return undefined;
 				},
+				sessionToggle: () => toggleSession(ctx),
 			});
 		},
+	});
+
+	/**
+	 * Flip the session-scoped switch. Never touches self-compact.json: the toggle lasts until
+	 * flipped back or the pane exits. --compact-off wins over it (explicit launch intent).
+	 */
+	function toggleSession(ctx: ExtensionContext, force?: boolean) {
+		R.sessionDisabled = force ?? !R.sessionDisabled;
+		refreshUi(ctx);
+		if (!ctx.hasUI) return;
+		if (R.sessionDisabled) {
+			ctx.ui.notify("self-compact OFF for this session — no warnings, no lock; native compaction still applies. /self-compact-toggle or ctrl+shift+k to re-enable.", "info");
+		} else if (handsOff(ctx)) {
+			ctx.ui.notify(`self-compact session toggle ON, but still hands-off: ${handsOffReason(ctx)}.`, "info");
+		} else {
+			ctx.ui.notify("self-compact ON for this session.", "info");
+		}
+	}
+
+	pi.registerCommand("self-compact-toggle", {
+		description: "Toggle self-compact for this session only (no file write): /self-compact-toggle [on|off]. Shortcut: ctrl+shift+k",
+		getArgumentCompletions: (prefix) => ["on", "off"].filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
+		handler: async (args, ctx: ExtensionCommandContext) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "on") toggleSession(ctx, false);
+			else if (arg === "off") toggleSession(ctx, true);
+			else toggleSession(ctx);
+		},
+	});
+
+	pi.registerShortcut("ctrl+shift+k", {
+		description: "Toggle self-compact for this session (same as /self-compact-toggle)",
+		handler: (ctx) => toggleSession(ctx),
 	});
 
 	// ------------------------------------------------------------- renderers
@@ -1093,6 +1187,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.on("session_switch", async (_event, ctx) => recover({ reason: "switch" }, ctx));
 	pi.on("session_tree", async (_event, ctx) => recover({ reason: "tree" }, ctx));
 	pi.on("session_branch", async (_event, ctx) => recover({ reason: "branch" }, ctx));
+	// model_select fires on /model and Ctrl+P changes; the 2s poll in startModelPoll stays as
+	// belt-and-braces for runtimes where the event doesn't fire.
+	pi.on("model_select", async (_event, ctx) => refreshUi(ctx));
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		R.alive = false;

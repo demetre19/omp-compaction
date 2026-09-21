@@ -12,6 +12,8 @@ import { parseTokenSpec, validateSpecs, SPEC_HELP, type ThresholdSpecs } from ".
 /** Effective values as the menu displays them (file values merged over defaults). */
 export interface MenuValues {
 	enabled: boolean;
+	/** Session-only switch (/self-compact-toggle); shown separately because it never writes the file. */
+	sessionDisabled: boolean;
 	compactSoftAt: string;
 	compactAt: string;
 	compactBuffer: string;
@@ -28,6 +30,8 @@ export interface SettingsMenuDeps {
 	knownRoles(): Record<string, string>;
 	/** Persist a patch into self-compact.json and reload the runtime; returns an error string on failure. */
 	apply(patch: Record<string, unknown>): string | undefined;
+	/** Flip the session-only switch (no file write). */
+	sessionToggle(): void;
 	/** Absolute path of the file being written (for the header and non-TUI fallback message). */
 	settingsPath(): string;
 }
@@ -43,7 +47,8 @@ export async function runSettingsMenu(ctx: ExtensionCommandContext, deps: Settin
 	for (;;) {
 		const v = deps.values();
 		const choice = await ctx.ui.select("self-compact settings", [
-			{ label: `Enabled: ${v.enabled ? "on" : "OFF"}`, description: "Master switch. Off = fully hands-off: no guidance, no lock, native compaction untouched." },
+			{ label: `Enabled: ${v.enabled ? "on" : "OFF"}`, description: "Master switch, saved to self-compact.json. Off = fully hands-off: no guidance, no lock, native compaction untouched." },
+			{ label: `This session: ${v.sessionDisabled ? "OFF" : "on"}`, description: "Session-only toggle — same as /self-compact-toggle or ctrl+shift+k. Never written to the file; ends with the pane." },
 			{ label: `Notice threshold: ${v.compactSoftAt}`, description: `First heads-up to the agent. ${SPEC_HELP}` },
 			{ label: `Warning threshold: ${v.compactAt}`, description: "Agent is asked to write its note and compact." },
 			{ label: `Forced buffer: ${v.compactBuffer}`, description: "Allowance above the warning line before every other tool is blocked." },
@@ -60,6 +65,8 @@ export async function runSettingsMenu(ctx: ExtensionCommandContext, deps: Settin
 			const ok = await ctx.ui.confirm("self-compact", target ? "Enable self-compaction management?" : "Disable self-compact? The agent keeps working; native compaction stays as the safety net.");
 			if (!ok) continue;
 			report(ctx, deps.apply({ enabled: target }));
+		} else if (choice.startsWith("This session:")) {
+			deps.sessionToggle();
 		} else if (choice.startsWith("Notice threshold:")) {
 			await editSpec(ctx, deps, "compactSoftAt", "Notice threshold", v);
 		} else if (choice.startsWith("Warning threshold:")) {
@@ -95,10 +102,26 @@ export async function runSettingsMenu(ctx: ExtensionCommandContext, deps: Settin
 }
 
 async function editSpec(ctx: ExtensionCommandContext, deps: SettingsMenuDeps, key: "compactSoftAt" | "compactAt" | "compactBuffer", title: string, v: MenuValues) {
-	const text = await ctx.ui.input(`${title} — ${SPEC_HELP}`, v[key]);
-	if (text === undefined) return;
-	const trimmed = text.trim();
-	if (!trimmed) return;
+	// Presets cover the common cases so the user picks instead of typing; "Custom…" keeps
+	// the free-form path for token counts and odd percentages.
+	const presets = ["10%", "15%", "20%", "30%", "40%", "50%", "60%", "70%", "80%"];
+	const current = v[key];
+	const options = [...new Set([current, ...presets])];
+	const CUSTOM = "Custom…";
+	const choice = await ctx.ui.select(`${title} — current: ${current}`, [
+		...options.map((p) => ({ label: p, description: p === current ? "current value" : undefined })),
+		{ label: CUSTOM, description: `Type a value. ${SPEC_HELP}` },
+	]);
+	if (choice === undefined) return;
+	let trimmed: string;
+	if (choice === CUSTOM) {
+		const text = await ctx.ui.input(`${title} — e.g. 45% or 500k`, "45%");
+		if (text === undefined) return;
+		trimmed = text.trim();
+		if (!trimmed) return;
+	} else {
+		trimmed = choice;
+	}
 	const candidate: ThresholdSpecs = { softAt: v.compactSoftAt, at: v.compactAt, buffer: v.compactBuffer, [key]: trimmed };
 	try {
 		validateSpecs(candidate);
