@@ -292,22 +292,20 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 	}
 
-	/** The uncapped forced target: warn + buffer before the 90%-of-window clamp. */
-	function forcedTarget(): number | undefined {
-		const t = R.thresholds;
-		return t ? t.warnTokens + t.bufferTokens : undefined;
-	}
+	/** Headroom the agent needs between the warning and the forced lock to finish a step and write its note. */
+	const MIN_WRAP_TOKENS = 20_000;
 
-	/** True when the model's window cannot even reach the forced threshold (e.g. a 262k window with a 300k target). */
-	function windowTooSmall(ctx: ExtensionContext): boolean {
-		const target = forcedTarget();
-		const window = ctx.model?.contextWindow ?? 0;
-		return target !== undefined && window > 0 && window <= target;
+	/** True when the model's window can't fit the warning plus wrap headroom under the 90% cap.
+	 *  With a 1m reference and 20%/5% specs that's every window under ~245k: 250k/262k models
+	 *  engage and compact at their cap (~225k/236k), smaller models stay hands-off. */
+	function windowTooSmall(): boolean {
+		const t = R.thresholds;
+		return t !== undefined && t.warnTokens + MIN_WRAP_TOKENS >= t.capTokens;
 	}
 
 	/** Fully hands-off: master switch off, model disabled by role/model, or window too small for the thresholds. */
 	function handsOff(ctx: ExtensionContext): boolean {
-		return R.disabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall(ctx);
+		return R.disabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
 	}
 
 	/** Why the extension is hands-off right now, for display. */
@@ -318,8 +316,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 			const role = Object.entries(R.disabledModels.roles).find(([, k]) => k === key)?.[0];
 			return `model ${key} is disabled${role ? ` (role ${role})` : ""}`;
 		}
-		if (windowTooSmall(ctx)) {
-			return `window ${(ctx.model?.contextWindow ?? 0).toLocaleString("en-US")} tokens is smaller than the forced threshold ${forcedTarget()!.toLocaleString("en-US")} tokens`;
+		if (windowTooSmall()) {
+			const t = R.thresholds!;
+			return `window ${t.contextWindow.toLocaleString("en-US")} tokens is too small: warning threshold ${t.warnTokens.toLocaleString("en-US")} meets the 90% cap ${t.capTokens.toLocaleString("en-US")}`;
 		}
 		return undefined;
 	}
