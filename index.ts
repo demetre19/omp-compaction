@@ -476,10 +476,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 			warnPct: t?.warnPct ?? 0,
 			forcedPct: t?.forcedPct ?? 0,
 		});
+		// Fill color follows the phase: green while idle, accent at notice, orange at
+		// warning, red at forced — the bar heats up as it approaches the markers.
+		const fill = R.level === "forced" ? "error" : R.level === "warning" ? "warning" : R.level === "notice" ? "accent" : "success";
 		const cells = bar.cells
 			.map((c) => {
-				if (c === "#") return theme.fg("success", c);
-				if (c === "=") return theme.fg("accent", c);
+				if (c === "#" || c === "=") return theme.fg(fill, c);
 				if (c === "~") return theme.fg("muted", c);
 				if (c === "!") return theme.fg("warning", c);
 				if (c === "|") return theme.fg("error", c);
