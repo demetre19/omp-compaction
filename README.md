@@ -59,7 +59,19 @@ CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-p
 
 **Same absolute trigger on every model.** Set `compactReferenceWindow` once and percentages become fixed token counts: `20%` of a 1M reference = 200k whether the model's window is 1M or 500k. With the defaults above, every model large enough compacts at ~250k absolute (or its 90% cap, whichever is lower); windows under ~245k never self-compact.
 
-**Why disable a model?** Free or huge-window models (e.g. Devin's SWE-2 at 262k) don't need early compaction — disabling them keeps the extension fully hands-off while native compaction remains as the safety net.
+**Why disable a model?** Some models shouldn't self-compact at all — e.g. a provider whose compaction endpoint is unreliable, or a model you want on native compaction only. Disabled models are fully hands-off: no guidance, no lock, native compaction untouched.
+
+## Recommended OMP settings
+
+The extension intercepts native auto-compaction on engaged models (`session_before_compact` → cancel + defer into the self-compact flow). Set native compaction so it never preempts the extension's warning phase:
+
+| OMP setting | Recommended | Why |
+| --- | --- | --- |
+| Auto-Compact | **ON** | Required — it's the trigger the extension intercepts on engaged models, and the only compaction for hands-off ones. Off = small models overflow. |
+| Compaction Threshold | **90** | At 60 (default) native fires at ~157k on a 262k window — before the extension's 200k warning — and the cancel+lock path would lock the session before the agent writes its note. At 90 it becomes a pure backstop. |
+| Idle Compaction | **OFF** | Would fire idle compactions the extension cancels anyway; noise. |
+| Mid-Turn Compaction | ON | Emergency safety net, orthogonal to the extension. |
+| Snapcompact / TTSR / token-reduction settings | your choice | Unrelated to the self-compact flow; TTSR-style reduction slows context growth and helps. |
 
 ## Commands & tools
 
