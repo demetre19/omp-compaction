@@ -103,9 +103,9 @@ Placeholders like `{{used_tokens}}`, `{{forced_tokens}}`, `{{note_max_chars}}` a
 - Custom summary prompt rides OMP's `session.compacting` hook (`prompt` + `preserveData`) — upstream's custom summarization transport is gone.
 - `session_before_compact` has no `reason`: own compactions are recognized by an in-flight flag, native auto-compaction by the `auto_compaction_start`/`_end` pair (cancelled and deferred to the self-compact flow), anything else is a manual `/compact` and proceeds with our prompt.
 - No `session_compact_failed` event: our compactions report through `ctx.compact`'s `onError`; external compactions are tracked and a stale "compacting" handoff fails at settle time.
-- No `agent_settled`/`model_select`/`registerEntryRenderer`: `session_stop` + a deferred `agent_end` check cover settling, model changes are detected lazily, and phase crossings go through `ctx.ui.notify`.
+- No `agent_settled`/`model_select`/`registerEntryRenderer`: `session_stop` + a deferred `agent_end` check cover settling, and phase crossings go through `ctx.ui.notify`. Model/role switches (`/model`, Ctrl+P) emit `model_changed` only on OMP's internal bus — extensions can't subscribe — so a managed 2s `ctx.setInterval` poll watches the model key and repaints the gauge, re-reads `self-compact.json`, and re-resolves thresholds against the new window on change.
 - `AgentToolResult` has no `terminate`: the result tells the model to stop, and a safety valve aborts the run after several consecutive locked tool blocks.
-- New in this port: `self-compact.json` settings file, `compactDisabledRoles`/`compactDisabledModels`/`enabled`, and the `/self-compact-settings` menu.
+- New in this port: `self-compact.json` settings file, `compactDisabledRoles`/`compactDisabledModels`/`enabled`, `compactReferenceWindow` (fixed-window % resolution → same absolute trigger on every model), and the `/self-compact-settings` menu.
 
 ## License
 
