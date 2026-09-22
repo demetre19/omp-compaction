@@ -9,6 +9,10 @@ This folder owns the `omp-compaction` repository: an OMP extension that lets a l
 - `self-compact.example.json` — documented settings example; the live file is `~/.omp/agent/self-compact.json` (not in this repo).
 - Remote: `https://github.com/demetre19/omp-compaction` (public, `main`).
 
+## Machines
+
+- Mac mini (this checkout): leader. The MacBook Pro keeps a clone at the same path (`~/Documents/UNCLUTTER-NEW/CLAUDE-DEV/omp-compaction`, cloned 2026-09-22 via `macbookpro-codex`, no `upstream/`); update it with `git pull` there or `sync-claude-dev push omp-compaction`. `~/.omp/agent/self-compact.json` is mirrored to the MacBook too — `model-sync` does not cover it, copy it manually when it changes.
+
 ## Boundaries
 
 - The extension is NOT installed globally. `~/.omp/agent/extensions/` must not contain it unless the user explicitly installs it. Test per-invocation: `omp -e /Users/apple/Documents/UNCLUTTER-NEW/CLAUDE-DEV/omp-compaction`.

@@ -10,7 +10,7 @@ The agent watches its own context gauge:
 - **Warning threshold** — the agent is told to write a `note_to_self` and call `self_compact`.
 - **Forced threshold** — every tool except `self_compact` and `view_context` is blocked until compaction succeeds.
 
-`self_compact({ note_to_self })` saves the note, ends the run, and compacts once the agent is idle — using a summary prompt you control. The note comes back **verbatim** as the next message, so the agent resumes its `NEXT ACTION` with no human message and no lost intent. Failures keep the note and the lock, retry automatically (up to 3×), and survive reloads, tree navigation, and crashes.
+`self_compact({ note_to_self })` saves the note, ends the run, and compacts once the agent is idle — using a summary prompt you control. The note comes back as the next message under a `[self-compact · handoff]` status line carrying the post-compaction numbers and an all-clear/still-high verdict, so the agent resumes its `NEXT ACTION` with no human message, no lost intent, and no blind re-compaction of a clean context. Failures keep the note and the lock, retry automatically (up to 3×), and survive reloads, tree navigation, and crashes.
 
 A colored one-line gauge sits below the editor: a 20-cell context bar (`#` cached, `=` used, `-` free; `~`/`!`/`|` threshold markers) whose fill heats up with the phase — green at idle, accent at notice, orange at warning, red at forced — plus used/window tokens, the phase tag, and the threshold legend. OMP's `setFooter` is a no-op stub, so the gauge renders through `setWidget` (ANSI-preserving); non-TUI modes fall back to a plain `setStatus` line.
 
@@ -88,7 +88,7 @@ The extension intercepts native auto-compaction on engaged models (`session_befo
 | `/self-compact-now` | Ask the agent to write its note and compact now (reuses a saved note on retry). |
 | `/self-compact-settings` | Interactive settings menu (TUI). |
 | `/self-compact-toggle` | Session-only on/off switch — no file write. `ctrl+shift+k` does the same. |
-| `self_compact` (tool) | Save `note_to_self`, end the run, compact when idle, return the note verbatim. |
+| `self_compact` (tool) | Save `note_to_self`, end the run, compact when idle, return the note under a post-compaction status line. |
 | `view_context` (tool) | The agent's own view of the gauge: used tokens, percent, level, thresholds, lock state as JSON. |
 
 ## Prompt files

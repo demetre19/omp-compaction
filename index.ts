@@ -15,7 +15,8 @@
  *   `tool_call` with an explicit reason.
  * - `self_compact({ note_to_self })` saves the note, ends the run, compaction runs once the agent is
  *   idle with the replacement summary prompt (via the `session.compacting` hook's `prompt` override),
- *   and the note is returned verbatim as a handoff message that starts the next turn.
+ *   and the note is returned under a [self-compact · handoff] status line (post-compaction
+ *   usage plus an all-clear/still-high verdict) as the message that starts the next turn.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and
  *   tree/branch recovery.
  * - One-line replacement footer: model id on the left, the 20-cell context bar and phase on the right.
@@ -106,7 +107,7 @@ const LOCKED_BLOCK_ABORT_AFTER = 5;
 const CONTEXT_FILTERED_TYPES = new Set([GUIDANCE_TYPE, PHASE_ENTRY_TYPE, INFO_ENTRY_TYPE]);
 
 /** Static system-prompt line: never changes between calls so the prompt-cache prefix stays stable. */
-const SYSTEM_PROMPT_LINE = `self-compact: when context usage crosses a threshold you receive a transient [self-compact · …] message with live numbers. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your own saved note_to_self is returned to you verbatim as the next message (exactly the note text, nothing else); resume its NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
+const SYSTEM_PROMPT_LINE = `self-compact: when context usage crosses a threshold you receive a transient [self-compact · …] message with live numbers. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your saved note_to_self is returned as the next message under a [self-compact · handoff] status line carrying the post-compaction numbers — when it says all clear, do not compact again; resume the note's NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
 
 interface UsageSnapshot {
 	tokens: number | null;
@@ -700,6 +701,24 @@ export default function selfCompact(pi: ExtensionAPI) {
 		);
 	}
 
+	/**
+	 * One-line post-compaction status prepended to the returned note: refreshes usage so the
+	 * numbers are post-compaction, then states whether another compaction is needed. Without
+	 * it the agent resumes blind and can re-trigger self_compact on a clean context.
+	 */
+	function handoffStatus(ctx: ExtensionContext): string {
+		R.usage = snapshotUsage(ctx);
+		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
+		const u = R.usage;
+		const where = u.percent === null
+			? "context usage unknown"
+			: `context now at ${formatPct(u.percent, 1)} (${u.tokens?.toLocaleString("en-US") ?? "?"}/${u.window.toLocaleString("en-US")} tokens)`;
+		const verdict = R.level === "warning" || R.level === "forced"
+			? `still at ${R.level} level — compact again only if a [self-compact · …] message asks`
+			: "all clear, no compaction needed — do not call self_compact again";
+		return `[self-compact · handoff · cycle ${R.state.cycle}] Compaction complete: ${where} — ${verdict}.`;
+	}
+
 	/** The verbatim-note transaction completes when the handoff message is in the branch. */
 	function markHandoffDoneIfJournaled(ctx: ExtensionContext) {
 		const h = handoff();
@@ -723,8 +742,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 			}
 			return;
 		}
-		// Content is exactly the saved note (verbatim contract); the header lives in the renderer and details.
-		pi.sendMessage({ customType: HANDOFF_TYPE, content: h.note, display: true, details: { id: h.id, cycle: R.state.cycle, note: h.note } }, { triggerTurn: true });
+		// Content is the live status line followed by the saved note verbatim; both also ride in details for the renderer.
+		const status = handoffStatus(ctx);
+		pi.sendMessage({ customType: HANDOFF_TYPE, content: `${status}\n\n${h.note}`, display: true, details: { id: h.id, cycle: R.state.cycle, note: h.note, status } }, { triggerTurn: true });
 	}
 
 	function startCompaction(ctx: ExtensionContext, trigger: string) {
@@ -952,12 +972,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "Self Compact",
-		description: `Hand off to yourself across a context compaction. Provide note_to_self (1 to ${NOTE_MAX_CHARS} characters): the goal, DONE work with exact file paths and commands, IN PROGRESS state, key decisions, verified test results, and the exact NEXT ACTION as the last line. Call it alone in a tool batch. The note is saved, this run ends, the context is compacted once you are idle, and the note is returned verbatim so you continue from NEXT ACTION. At the hard cutoff every other tool is blocked until this succeeds.`,
-		promptSnippet: "Compact your own context: save a note_to_self, compaction runs when the turn ends, the note comes back verbatim",
+		description: `Hand off to yourself across a context compaction. Provide note_to_self (1 to ${NOTE_MAX_CHARS} characters): the goal, DONE work with exact file paths and commands, IN PROGRESS state, key decisions, verified test results, and the exact NEXT ACTION as the last line. Call it alone in a tool batch. The note is saved, this run ends, the context is compacted once you are idle, and the note is returned under a status line with the post-compaction numbers so you continue from NEXT ACTION. At the hard cutoff every other tool is blocked until compaction succeeds.`,
+		promptSnippet: "Compact your own context: save a note_to_self, compaction runs when the turn ends, the note comes back under a status line",
 		promptGuidelines: [
 			`Use ${TOOL_NAME} alone in a tool batch when a [self-compact · …] message asks you to compact, or at a clean checkpoint when context is high.`,
 			`A ${TOOL_NAME} note_to_self states the goal, DONE work with exact paths, IN PROGRESS state, key decisions, verified test results, and the exact NEXT ACTION as its last line; never list finished work as pending.`,
-			`After a [self-compact · handoff] message, continue only the unfinished NEXT ACTION from your note; if the task is complete, report completion and stop.`,
+			`After a [self-compact · handoff] message, read its status line: all clear means do not compact again — continue only the unfinished NEXT ACTION from your note; if the task is complete, report completion and stop.`,
 		],
 		parameters: Type.Object({
 			note_to_self: Type.String({ description: `Your handoff note (1-${NOTE_MAX_CHARS} chars). Ends with the exact NEXT ACTION.` }),
@@ -991,7 +1011,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			notify(ctx, `self-compact: note saved (${note.length} chars). Compaction runs when this turn ends.`, "info");
 			const at = R.usage.tokens === null ? "unknown usage" : `${R.usage.tokens.toLocaleString("en-US")} tokens (${formatPct(R.usage.percent, 1)}), level ${R.level}`;
 			return {
-				content: [{ type: "text", text: `Note saved (${note.length} chars) at ${at}. Every other tool is blocked until compaction succeeds. This turn is complete — end it with a one-line final answer (e.g. "Compacting; resuming after the handoff."). Compaction runs once the run settles and your note is returned verbatim.` }],
+				content: [{ type: "text", text: `Note saved (${note.length} chars) at ${at}. Every other tool is blocked until compaction succeeds. This turn is complete — end it with a one-line final answer (e.g. "Compacting; resuming after the handoff."). Compaction runs once the run settles and your note is returned under a status line with the post-compaction numbers.` }],
 				details: { handoffId: R.state.handoff.id, noteChars: note.length, cycle: R.state.cycle + 1, note, usedTokens: R.usage.tokens, usedPercent: R.usage.percent, level: R.level },
 				// Ignored by OMP today (no terminate field); harmless if upstream semantics arrive.
 				terminate: true,
@@ -1120,11 +1140,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.registerMessageRenderer(HANDOFF_TYPE, (message, options, theme) => {
 		// We author these details in deliverHandoff/recover; the shape is ours.
-		const details = message.details as { cycle?: number; note?: string } | undefined;
+		const details = message.details as { cycle?: number; note?: string; status?: string; resumed?: boolean } | undefined;
 		const note = details?.note ?? (typeof message.content === "string" ? message.content : "");
 		// Always show the full note: this is exactly what was fed back into the agent after compaction.
-		const header = theme.fg("success", theme.bold(`self-compact · handoff`)) + theme.fg("dim", ` cycle ${details?.cycle ?? "?"}, note_to_self returned verbatim to the agent (${note.length.toLocaleString("en-US")} chars):`);
-		return new Text(`${header}\n${theme.fg("text", note)}`, options.outputPad ?? 1, 0);
+		const header = theme.fg("success", theme.bold(`self-compact · handoff`)) + theme.fg("dim", ` cycle ${details?.cycle ?? "?"}, note_to_self returned to the agent (${note.length.toLocaleString("en-US")} chars):`);
+		const status = details?.status ? `${theme.fg("accent", details.status)}\n` : "";
+		return new Text(`${header}\n${status}${theme.fg("text", note)}`, options.outputPad ?? 1, 0);
 	});
 
 
@@ -1166,8 +1187,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 			const note = h.note;
 			deferInEpoch("recoveryTimer", 500, () => {
 				if (!ctx.isIdle()) return;
+				const status = handoffStatus(ctx);
 				pi.sendMessage(
-					{ customType: HANDOFF_TYPE, content: `Continue from your saved note_to_self above (self-compact cycle ${cycle}). Perform only its unfinished NEXT ACTION.`, display: false, details: { id, cycle, note, resumed: true } },
+					{ customType: HANDOFF_TYPE, content: `${status}\n\nContinue from your saved note_to_self above (self-compact cycle ${cycle}). Perform only its unfinished NEXT ACTION.`, display: false, details: { id, cycle, note, status, resumed: true } },
 					{ triggerTurn: true },
 				);
 			});
