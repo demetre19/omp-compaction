@@ -12,6 +12,27 @@ The agent watches its own context gauge:
 
 `self_compact({ note_to_self })` saves the note, ends the run, and compacts once the agent is idle — using a summary prompt you control. The note comes back as the next message under a `[self-compact · handoff]` status line carrying the post-compaction numbers and an all-clear/still-high verdict, so the agent resumes its `NEXT ACTION` with no human message, no lost intent, and no blind re-compaction of a clean context. Failures keep the note and the lock, retry automatically (up to 3×), and survive reloads, tree navigation, and crashes.
 
+## Jev prune, measured (real sessions, 2026-09-29)
+
+An optional **Jev verdict-prune** stage (on by default) scores every tool call before summarizing and drops what won't matter:
+
+```
+                       ┌──────────────────────────────┐
+ transcript            │   Jev scores 270 tool calls  │              ┌─ same LLM summary ─┐
+ 560 messages ───────► │  keep 2 · drop 268 (~1.0 s)  │ ───────────► │ reads ~3% of bytes │
+ ~4.1 MB               └──────────────────────────────┘  453 KB      └────────────────────┘
+
+   normal compaction input  ████████████████████████████████████████ ~4.1 MB
+   with jev-prune           ████▌ 453 KB                    −89% bytes · −96.8% scored chars
+```
+
+| Session | Calls scored | Kept | Summarize input | Prune cost |
+| --- | --- | --- | --- | --- |
+| 560-msg in-flight | 270 | 2 | 1.33M → 42K chars | ~1.0 s · 7 req · ≈$0.0001 |
+| 705-msg / 339-call | 339 | 3 | −98.6% chars | ~1.5–2.4 s · 9 req |
+
+**Result:** the pruned compaction **finished inside a window the identical unpruned run exceeded** — the summary model reads ~3% of the bytes. No Jev transport → silent fallback to plain compaction. Credentials + settings: [Jev verdict-prune](#jev-verdict-prune-optional-on-by-default).
+
 A colored one-line gauge sits below the editor: a 20-cell context bar (`#` cached, `=` used, `-` free; `~`/`!`/`|` threshold markers) whose fill heats up with the phase — green at idle, accent at notice, orange at warning, red at forced — plus used/window tokens, the phase tag, and the threshold legend. OMP's `setFooter` is a no-op stub, so the gauge renders through `setWidget` (ANSI-preserving); non-TUI modes fall back to a plain `setStatus` line.
 
 ## Install
