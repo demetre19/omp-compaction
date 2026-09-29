@@ -68,6 +68,37 @@ CLI flags (`--compact-soft-at`, `--compact-at`, `--compact-buffer`, `--compact-p
 
 **Why disable a model?** Some models shouldn't self-compact at all — e.g. a provider whose compaction endpoint is unreliable, or a model you want on native compaction only. Disabled models are fully hands-off: no guidance, no lock, native compaction untouched.
 
+## Jev verdict-prune (optional, on by default)
+
+Before the LLM summarizer runs, the extension can ask **Jev** (TypeSafe System One) to score every tool call in `messagesToSummarize`: is the call still relevant, and does its full result need to stay verbatim. Dropped results are truncated to a head + "re-run the tool" note; dropped calls are removed with their results — in place, before summarization. The summarizer then sees a much smaller, less noisy input. User/assistant text is never touched. Ported from [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) (MIT, vendored under `vendor/fast-jev/`).
+
+**This is a pre-stage, not a replacement:** the summary still runs, unchanged. On a 705-message session fixture Jev cut ~98% of summarizable characters in ~2 s (9 parallel requests).
+
+### Transport ladder
+
+Credentials are resolved once per compaction, in `compactJevTransports` order; the first transport that answers stays active for the rest of that compaction. **If a transport errors (402/no credits, network, malformed), the next one takes over automatically. If none work — or none have credentials — pruning is skipped and native compaction runs exactly as before.** Nothing is silently broken: a one-line note reports which transport served or why it was skipped.
+
+| Order | Transport | Endpoint | Model | Credential source (first found) |
+| --- | --- | --- | --- | --- |
+| 1 | `openrouter` | `https://openrouter.ai/api/alpha/decisions` | `typesafe/jev-1.13` | `OPENROUTER_API_KEY` env → `openrouter` api_key row in `~/.omp/agent/agent.db` (via `omp login` / `/login`) |
+| 2 | `openlux` | `<baseUrl>/systemone` (baseUrl from `~/.omp/agent/models.yml`) | `jev-1.13.0` | `OPENLUX_API_KEY` env → the `apiKey` directive in the `openlux` block of `~/.omp/agent/models.yml` (e.g. a `!cat`/`!sed` secret path) |
+| 3 | `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | `TYPESAFE_API_KEY` env → `typesafe` api_key row in `~/.omp/agent/agent.db` |
+
+No credentials are stored by this extension — it only reads the env vars, `agent.db` rows, and `models.yml` secret directives you already configured. The cheapest lane is OpenRouter (~$1e-5 per request; a typical compaction needs under a dozen).
+
+### Jev settings (`self-compact.json`)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `compactJev` | `true` | Master switch for the prune stage. `--compact-jev off` disables for one run. |
+| `compactJevThreshold` | `0.5` | Keep probability for a call/result to survive pruning. Raise toward 0.7 to keep more. |
+| `compactJevPreserve` | `3` | Newest messages of the summarize list never touched (first message is always pinned). |
+| `compactJevHeadChars` | `300` | Characters retained of a dropped tool result, before the re-run note. |
+| `compactJevTransports` | `["openrouter","openlux","typesafe"]` | Ladder order; remove lanes you don't want used. |
+| `compactJevTimeoutMs` | `60000` | Hard cap for the whole Jev stage; on timeout, native compaction proceeds unpruned. |
+
+Prune activity shows as one notify line per compaction (transport, calls cut, % smaller input, ms); skip reasons are notified once per session.
+
 ## Recommended OMP settings
 
 The extension intercepts native auto-compaction on engaged models (`session_before_compact` → cancel + defer into the self-compact flow). Set native compaction so it never preempts the extension's warning phase:
@@ -110,6 +141,7 @@ Placeholders like `{{used_tokens}}`, `{{forced_tokens}}`, `{{note_max_chars}}` a
 - No `agent_settled`/`model_select`/`registerEntryRenderer`: `session_stop` + a deferred `agent_end` check cover settling, and phase crossings go through `ctx.ui.notify`. Model/role switches (`/model`, Ctrl+P) emit `model_changed` only on OMP's internal bus — extensions can't subscribe — so a managed 2s `ctx.setInterval` poll watches the model key and repaints the gauge, re-reads `self-compact.json`, and re-resolves thresholds against the new window on change.
 - `AgentToolResult` has no `terminate`: the result tells the model the turn is complete, and `agent_end` aborts the run when a handoff is pending and OMP scheduled a continuation (`willContinue`) — the abort bumps `promptGeneration`, staling the nudge-continue, and the deferred settle check starts compaction (abort suppresses `session_stop`, so that deferred `onSettled` is the only post-abort compaction path). A safety valve aborts after several consecutive locked tool blocks as backstop.
 - New in this port: `self-compact.json` settings file, `compactDisabledRoles`/`compactDisabledModels`/`enabled`, `compactReferenceWindow` (fixed-window % resolution → same absolute trigger on every model), and the `/self-compact-settings` menu.
+- New in this port: the **Jev verdict-prune** pre-stage (`jev-prune.ts` + vendored `vendor/fast-jev/`) — optional, on by default, silently skipped when no transport works. See the section above.
 
 ## License
 

@@ -9,5 +9,11 @@
 	"compactModelThresholds": {
 		"devin/claude-fable-5-1": { "compactAt": "60%", "compactBuffer": "10%" },
 		"devin/*": { "compactAt": "40%" }
-	}
+	},
+	"compactJev": true,
+	"compactJevThreshold": 0.5,
+	"compactJevPreserve": 3,
+	"compactJevHeadChars": 300,
+	"compactJevTransports": ["openrouter", "openlux", "typesafe"],
+	"compactJevTimeoutMs": 60000
 }

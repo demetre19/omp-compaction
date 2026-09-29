@@ -42,6 +42,18 @@ export interface FileSettings {
 	compactDisabledRoles?: string[];
 	compactDisabledModels?: string[];
 	compactModelThresholds?: Record<string, ModelThresholdOverride>;
+	/** Jev verdict-prune stage before summarization (default on; falls back to native when unavailable). */
+	compactJev?: boolean;
+	/** Keep probability threshold for a call/result to survive pruning. */
+	compactJevThreshold?: number;
+	/** Tail messages of the summarize list never pruned. */
+	compactJevPreserve?: number;
+	/** Characters kept of a dropped tool result. */
+	compactJevHeadChars?: number;
+	/** Ordered Jev transports: subset of ["openrouter","openlux","typesafe"]. */
+	compactJevTransports?: string[];
+	/** Hard timeout for the whole Jev stage. */
+	compactJevTimeoutMs?: number;
 }
 
 export interface LoadedSettings {
@@ -65,12 +77,13 @@ export function settingsSearchPaths(cwd: string): string[] {
 	return paths.filter((p, index) => paths.indexOf(p) === index);
 }
 type StringKey = "compactSoftAt" | "compactAt" | "compactBuffer" | "compactPrompt" | "compactReferenceWindow";
-type BoolKey = "enabled";
-type ListKey = "compactDisabledRoles" | "compactDisabledModels";
+type BoolKey = "enabled" | "compactJev";
+type NumKey = "compactJevThreshold" | "compactJevPreserve" | "compactJevHeadChars" | "compactJevTimeoutMs";
+type ListKey = "compactDisabledRoles" | "compactDisabledModels" | "compactJevTransports";
 type MapKey = "compactModelThresholds";
 
 /** camelCase keys plus the dashed CLI spellings, so either style works in the file. */
-const KEY_ALIASES: Record<string, StringKey | BoolKey | ListKey | MapKey> = {
+const KEY_ALIASES: Record<string, StringKey | BoolKey | NumKey | ListKey | MapKey> = {
 	enabled: "enabled",
 	compactSoftAt: "compactSoftAt",
 	"compact-soft-at": "compactSoftAt",
@@ -88,12 +101,31 @@ const KEY_ALIASES: Record<string, StringKey | BoolKey | ListKey | MapKey> = {
 	"compact-disabled-models": "compactDisabledModels",
 	compactModelThresholds: "compactModelThresholds",
 	"compact-model-thresholds": "compactModelThresholds",
+	compactJev: "compactJev",
+	"compact-jev": "compactJev",
+	compactJevThreshold: "compactJevThreshold",
+	"compact-jev-threshold": "compactJevThreshold",
+	compactJevPreserve: "compactJevPreserve",
+	"compact-jev-preserve": "compactJevPreserve",
+	compactJevHeadChars: "compactJevHeadChars",
+	"compact-jev-head-chars": "compactJevHeadChars",
+	compactJevTransports: "compactJevTransports",
+	"compact-jev-transports": "compactJevTransports",
+	compactJevTimeoutMs: "compactJevTimeoutMs",
+	"compact-jev-timeout-ms": "compactJevTimeoutMs",
 };
 
-const BOOL_KEYS: Record<string, BoolKey> = { enabled: "enabled" };
+const BOOL_KEYS: Record<string, BoolKey> = { enabled: "enabled", compactJev: "compactJev" };
+const NUM_KEYS: Record<string, NumKey> = {
+	compactJevThreshold: "compactJevThreshold",
+	compactJevPreserve: "compactJevPreserve",
+	compactJevHeadChars: "compactJevHeadChars",
+	compactJevTimeoutMs: "compactJevTimeoutMs",
+};
 const LIST_KEYS: Record<string, ListKey> = {
 	compactDisabledRoles: "compactDisabledRoles",
 	compactDisabledModels: "compactDisabledModels",
+	compactJevTransports: "compactJevTransports",
 };
 const MAP_KEYS: Record<string, MapKey> = { compactModelThresholds: "compactModelThresholds" };
 /** Keys allowed inside one compactModelThresholds entry (camelCase or dashed spelling). */
@@ -133,6 +165,11 @@ export function loadSettingsFile(cwd: string): LoadedSettings {
 					return { values: {}, source: path, error: `${path}: "${key}" must be a boolean, got ${typeof value}.` };
 				}
 				values[canonical as BoolKey] = value;
+			} else if (canonical in NUM_KEYS) {
+				if (typeof value !== "number" || !Number.isFinite(value)) {
+					return { values: {}, source: path, error: `${path}: "${key}" must be a number, got ${typeof value}.` };
+				}
+				values[canonical as NumKey] = value;
 			} else if (canonical in LIST_KEYS) {
 				if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
 					return { values: {}, source: path, error: `${path}: "${key}" must be an array of strings.` };

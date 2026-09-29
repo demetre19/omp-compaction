@@ -67,6 +67,7 @@ import {
 	type TemplateValues,
 } from "./prompts.ts";
 import { loadSettingsFile, settingsSearchPaths, settingsWritePath, writeSettingsFile, type ModelThresholdOverride } from "./settings.ts";
+import { DEFAULT_JEV, jevPrunePreparation, type JevPruneSettings } from "./jev-prune.ts";
 import { isModelDisabled, loadModelRoles, modelKey, resolveDisabledModels, type DisabledModels } from "./roles.ts";
 import { runSettingsMenu, type MenuValues } from "./menu.ts";
 import {
@@ -171,8 +172,12 @@ interface Runtime {
 	alive: boolean;
 	idleRequestEpoch: number;
 	promptErrors: Set<string>;
+	/** Jev verdict-prune settings (compactJev*), resolved in loadSettings. */
+	jev: JevPruneSettings;
 	/** Last hands-off reason already notified (dedup: notify once per change, not per recover). */
 	notifiedOffReason?: string;
+	/** Jev prune skip-reason already notified (dedup per session). */
+	jevNoticed: boolean;
 	/** Resolve notes already shown (dedup: the 90%-cap warning fires once per distinct note). */
 	notifiedResolveNotes: Set<string>;
 	/** True once loadSettings has run; print mode never fires session_start, so refreshUi loads lazily. */
@@ -225,6 +230,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerFlag("compact-disable-model", { description: "provider/model (or provider/*) that never self-compacts (repeatable or comma-separated).", type: "string" });
 	pi.registerFlag("compact-reference-window", { description: "Fixed window that percentage thresholds resolve against (e.g. 1m): every model compacts at the same absolute tokens; windows too small for warn+buffer stay hands-off.", type: "string" });
 	pi.registerFlag("compact-off", { description: "Start hands-off: no guidance, no lock, native compaction untouched. Same as /self-compact-toggle off but from launch.", type: "boolean" });
+	pi.registerFlag("compact-jev", { description: "Jev verdict-prune of stale tool calls/results before summarization (on/off, default on). Falls back to plain native compaction when unavailable.", type: "string" });
 
 	const R: Runtime = {
 		specs: { ...DEFAULT_SPECS },
@@ -235,6 +241,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		sessionDisabled: false,
 		disabledModels: { keys: {}, roles: {}, unknownRoles: [], direct: [] },
 		modelThresholds: {},
+		jev: { ...DEFAULT_JEV },
+		jevNoticed: false,
 		searchDirs: promptSearchDirs(process.cwd(), EXTENSION_DIR),
 		usage: { tokens: null, percent: null, cachedTokens: 0, window: 0 },
 		level: "unknown",
@@ -267,6 +275,56 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (typeof value === "string") return value.split(",").map((s) => s.trim()).filter(Boolean);
 		return [];
 	};
+
+	/** Merge file compactJev* keys + the --compact-jev flag onto DEFAULT_JEV. */
+	function resolveJevSettings(values: { compactJev?: boolean; compactJevThreshold?: number; compactJevPreserve?: number; compactJevHeadChars?: number; compactJevTransports?: string[]; compactJevTimeoutMs?: number }): JevPruneSettings {
+		const flagValue = flag("compact-jev");
+		const flagOn = flagValue === undefined ? undefined : !/^(off|false|0|no)$/i.test(flagValue);
+		const transports = values.compactJevTransports?.filter((t) => ["openrouter", "openlux", "typesafe"].includes(t));
+		return {
+			enabled: flagOn ?? values.compactJev ?? DEFAULT_JEV.enabled,
+			keepThreshold: values.compactJevThreshold ?? DEFAULT_JEV.keepThreshold,
+			preserveRecentMessages: values.compactJevPreserve ?? DEFAULT_JEV.preserveRecentMessages,
+			truncateHeadChars: values.compactJevHeadChars ?? DEFAULT_JEV.truncateHeadChars,
+			transports: transports && transports.length > 0 ? transports : DEFAULT_JEV.transports,
+			timeoutMs: values.compactJevTimeoutMs ?? DEFAULT_JEV.timeoutMs,
+		};
+	}
+
+	/**
+	 * Jev verdict-prune over the compaction preparation, in place. Runs only for
+	 * compactions that will actually proceed (our ctx.compact + external /compact);
+	 * failures leave the preparation untouched so the summary path is unchanged.
+	 */
+	async function runJevPrune(ctx: ExtensionContext, event: { preparation?: { messagesToSummarize?: unknown[]; turnPrefixMessages?: unknown[] } }) {
+		if (!R.jev.enabled) return;
+		const prep = event.preparation;
+		if (!prep) return;
+		try {
+			const outcome = await jevPrunePreparation(
+				prep as Parameters<typeof jevPrunePreparation>[0],
+				R.jev,
+				(note) => notify(ctx, `self-compact: ${note}`, "warning"),
+			);
+			if (outcome.pruned && outcome.stats) {
+				const s = outcome.stats;
+				const pct = s.charsBefore > 0 ? Math.round((1 - s.charsAfter / s.charsBefore) * 100) : 0;
+				notify(
+					ctx,
+					`self-compact: jev-prune via ${s.transport}: ${s.callsDropped + s.resultsDropped}/${s.calls} calls cut, ${pct}% smaller summarize input (${s.ms}ms, ${s.requests} req)`,
+					"info",
+				);
+			} else if (!outcome.pruned && outcome.reason && !R.jevNoticed) {
+				R.jevNoticed = true;
+				notify(ctx, `self-compact: jev-prune skipped (${outcome.reason}); native summary unchanged`, "info");
+			}
+		} catch (error) {
+			if (!R.jevNoticed) {
+				R.jevNoticed = true;
+				notify(ctx, `self-compact: jev-prune error (${error instanceof Error ? error.message : String(error)}); native summary unchanged`, "warning");
+			}
+		}
+	}
 	function loadSettings(cwd: string) {
 		R.settingsLoaded = true;
 		const file = loadSettingsFile(cwd);
@@ -297,9 +355,13 @@ export default function selfCompact(pi: ExtensionAPI) {
 			cwd,
 		);
 		R.modelThresholds = file.values.compactModelThresholds ?? {};
+		R.jev = resolveJevSettings(file.values);
 		R.configError = file.error;
 		const refSpec = flag("compact-reference-window") ?? file.values.compactReferenceWindow;
 		R.referenceWindow = undefined;
+		// Off means off: a disabled extension never judges the config, so stale or broken
+		// values in the file can't set configError/resolveError and block every tool.
+		if (R.disabled || R.flagDisabled) return;
 		if (refSpec !== undefined) {
 			try {
 				const parsed = parseTokenSpec(refSpec, "compactReferenceWindow");
@@ -346,13 +408,15 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return t !== undefined && t.warnTokens + MIN_WRAP_TOKENS >= t.capTokens;
 	}
 
-	/** Fully hands-off: master switch off, launch flag, session toggle, model disabled by role/model, or window too small for the thresholds. */
+	/** Fully hands-off: rejected settings (fail-open — never brick the session), master switch off, launch flag, session toggle, model disabled by role/model, or window too small for the thresholds. */
 	function handsOff(ctx: ExtensionContext): boolean {
-		return R.disabled || R.flagDisabled || R.sessionDisabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
+		return inert() !== undefined || R.disabled || R.flagDisabled || R.sessionDisabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
 	}
 
 	/** Why the extension is hands-off right now, for display. */
 	function handsOffReason(ctx: ExtensionContext): string | undefined {
+		const problem = inert();
+		if (problem) return `settings rejected: ${problem}`;
 		if (R.disabled) return "disabled in self-compact.json";
 		if (R.flagDisabled) return "disabled by --compact-off";
 		if (R.sessionDisabled) return "disabled for this session (/self-compact-toggle or ctrl+shift+k to re-enable)";
@@ -454,6 +518,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 	}
 
 	function resolve(ctx: ExtensionContext) {
+		// Hands-off runs never resolve: a bad spec must not produce a resolveError that
+		// turns into an inert brick while the extension is disabled anyway.
+		if (R.disabled || R.flagDisabled) {
+			R.thresholds = undefined;
+			R.resolveError = undefined;
+			R.activeThresholdOverride = undefined;
+			return;
+		}
 		const { specs, fromDefaults, pattern } = effectiveSpecs(ctx);
 		R.activeThresholdOverride = pattern;
 		const result = resolveThresholds(specs, ctx.model?.contextWindow ?? 0, { fromDefaults, referenceWindow: R.referenceWindow });
@@ -873,7 +945,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			...dm.direct,
 		];
 		if (disabledDesc.length > 0) lines.push(`disabled: ${disabledDesc.join(", ")}`);
-		if (problem) lines.push(`REJECTED: ${problem} (extension is inert; every tool is blocked until fixed)`);
+		if (problem) lines.push(`REJECTED: ${problem} (self-compact is hands-off until fixed; tools are not blocked)`);
 		lines.push(`model: ${model}, window ${fmt(R.usage.window)} tokens, cap ${t ? fmt(t.capTokens) : "?"} (90%)`);
 		if (t) {
 			lines.push(`resolved: soft ${fmt(t.softTokens)} (${formatPct(t.softPct, 1)}), warning ${fmt(t.warnTokens)} (${formatPct(t.warnPct, 1)}), buffer ${fmt(t.bufferTokens)}, forced ${fmt(t.forcedTokens)} (${formatPct(t.forcedPct, 1)})${t.clamped ? " [clamped]" : ""}`);
@@ -1166,11 +1238,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 		loadSettings(ctx.cwd);
 		resolve(ctx);
 		const problem = inert();
-		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Every tool is blocked until the flags are fixed.`, "error");
+		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Self-compact is disabled for this session — tools are not blocked and native compaction still applies. Fix self-compact.json or the --compact-* flags, then restart or run /self-compact-settings.`, "error");
 		const off = handsOffReason(ctx);
 		if (off !== R.notifiedOffReason) {
 			R.notifiedOffReason = off;
-			if (off && ctx.hasUI) ctx.ui.notify(`self-compact: ${off} — hands-off for this session (native compaction still applies).`, "info");
+			if (off && !problem && ctx.hasUI) ctx.ui.notify(`self-compact: ${off} — hands-off for this session (native compaction still applies).`, "info");
 		}
 
 		const recovered = recoverState(ctx.sessionManager.getBranch() as EntryLike[]);
@@ -1204,7 +1276,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 				notify(ctx, `self-compact: compaction finished before ${event.reason}; returning the saved note.`, "info");
 				deliverHandoff(ctx);
 			}
-		} else if (h && (h.status === "pending" || h.status === "failed" || h.status === "compacting")) {
+		} else if (h && (h.status === "pending" || h.status === "failed" || h.status === "compacting") && !handsOff(ctx)) {
 			R.state.handoff = { ...h, status: h.status === "compacting" ? "failed" : h.status, attempts: 0, error: h.status === "compacting" ? "Compaction was interrupted (session reloaded)." : h.error };
 			setLocked(true);
 			save();
@@ -1271,12 +1343,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		await trackLevel(ctx);
-		const problem = inert();
-		if (problem) return { block: true, reason: `self-compact rejected its settings, so this session is not protected: ${problem}. Fix the --compact-* flags or self-compact.json and restart.` };
 		if (event.toolName === TOOL_NAME) return undefined;
 		// Looking at the gauge is always allowed, even while every other tool is locked.
 		if (event.toolName === VIEW_TOOL_NAME) return undefined;
-		// Hands-off sessions (master switch off or disabled model) never block tools.
+		// Hands-off sessions never block tools: master switch off, --compact-off, session
+		// toggle, disabled model, window too small — or rejected settings, which fail open
+		// (extension inert, tools untouched) instead of bricking the session.
 		if (handsOff(ctx)) return undefined;
 		// Whole-batch preflight: siblings of a self_compact call in the same assistant message are blocked too.
 		const branch = ctx.sessionManager.getBranch() as EntryLike[];
@@ -1375,6 +1447,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 				notify(ctx, `self-compact: ${R.lastCompactionError}`, "error");
 				return { cancel: true };
 			}
+			await runJevPrune(ctx, event);
 			return undefined;
 		}
 		if (R.autoCompactionActive) {
@@ -1400,6 +1473,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			h.status = "compacting";
 			save();
 		}
+		await runJevPrune(ctx, event);
 		return undefined;
 	});
 	pi.on("session.compacting", async (_event, ctx) => {
