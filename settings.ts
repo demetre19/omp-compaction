@@ -23,7 +23,7 @@
  *                            { "provider/model" | "provider/*": { compactSoftAt?, compactAt?, compactBuffer? } }
  *                            Exact keys beat provider wildcards; CLI flags still win over everything.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { agentDirs, primaryAgentDir } from "./agent-dir.ts";
@@ -209,6 +209,28 @@ export function loadSettingsFile(cwd: string): LoadedSettings {
 		return { values, source: path };
 	}
 	return { values: {} };
+}
+
+/**
+ * Stamp the file `loadSettingsFile(cwd)` would resolve — the first search path that
+ * exists — as "path:mtimeMs:size", or undefined when no settings file exists.
+ * Compared against the stamp captured at the last load, this detects every
+ * mid-session change to the EFFECTIVE file: content edits, deletion, a
+ * higher-precedence file appearing, or the first file being created. A path that
+ * exists but cannot be stat'd still stamps (":-1:-1"): loadSettingsFile would
+ * report its read error against it.
+ */
+export function settingsFileStamp(cwd: string): string | undefined {
+	for (const path of settingsSearchPaths(cwd)) {
+		try {
+			const st = statSync(path);
+			return `${path}:${st.mtimeMs}:${st.size}`;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			return `${path}:-1:-1`;
+		}
+	}
+	return undefined;
 }
 
 /**

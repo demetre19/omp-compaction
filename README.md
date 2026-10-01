@@ -53,7 +53,7 @@ Then configure via `~/.omp/agent/self-compact.json` (created on first write, or 
 
 ## Settings
 
-`/self-compact-settings` opens an interactive menu: enable/disable, a session-only toggle, thresholds (preset picker), disabled roles (checkbox list over your `modelRoles`), disabled models, and the compaction prompt. Changes write `self-compact.json` and apply **live** — including turning the extension off mid-session.
+`/self-compact-settings` opens an interactive menu: enable/disable, a session-only toggle, thresholds (preset picker), disabled roles (checkbox list over your `modelRoles`), disabled models, and the compaction prompt. Changes write `self-compact.json` and apply **live** — including turning the extension off mid-session. Editing `self-compact.json` directly applies live too: the file's stamp is checked at every decision point (and on the TUI's 2s poll), so an agent or operator editing the file mid-session re-resolves disabled roles/models, thresholds, and the master switch without a restart.
 
 **Quick toggle:** `/self-compact-toggle` (or `ctrl+shift+k`) flips self-compact off/on for the current session only — nothing is written to disk, so it's the fast way to ride out a PRD approval phase and turn protection back on after. `/self-compact-toggle off` / `on` set it explicitly. To start a run already hands-off, launch with `--compact-off`.
 

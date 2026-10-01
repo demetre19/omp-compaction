@@ -66,7 +66,7 @@ import {
 	resolveCompactionPrompt,
 	type TemplateValues,
 } from "./prompts.ts";
-import { loadSettingsFile, settingsSearchPaths, settingsWritePath, writeSettingsFile, type ModelThresholdOverride } from "./settings.ts";
+import { loadSettingsFile, settingsFileStamp, settingsSearchPaths, settingsWritePath, writeSettingsFile, type ModelThresholdOverride } from "./settings.ts";
 import { DEFAULT_JEV, jevPrunePreparation, type JevPruneSettings } from "./jev-prune.ts";
 import { isModelDisabled, loadModelRoles, modelKey, resolveDisabledModels, type DisabledModels } from "./roles.ts";
 import { runSettingsMenu, type MenuValues } from "./menu.ts";
@@ -135,6 +135,8 @@ interface Runtime {
 	/** Fixed window percentage specs resolve against (tokens); undefined = model's own window. */
 	referenceWindow?: number;
 	settingsFile?: string;
+	/** Stamp of the settings file at the last load; syncSettings re-loads when the file on disk no longer matches. */
+	settingsStamp?: string;
 	sources: { softAt: SpecSource; at: SpecSource; buffer: SpecSource };
 	fromDefaults: boolean;
 	configError?: string;
@@ -329,6 +331,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.settingsLoaded = true;
 		const file = loadSettingsFile(cwd);
 		R.settingsFile = file.source;
+		// Stamp AFTER the read so the change check doesn't immediately re-trigger:
+		// a write landing between the read and this stat reloads once more on the next
+		// check — one wasted reload, never a missed one.
+		R.settingsStamp = settingsFileStamp(cwd);
 		const softFlag = flag("compact-soft-at");
 		const atFlag = flag("compact-at");
 		const bufferFlag = flag("compact-buffer");
@@ -408,13 +414,35 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return t !== undefined && t.warnTokens + MIN_WRAP_TOKENS >= t.capTokens;
 	}
 
+	/**
+	 * Re-resolve file settings when self-compact.json changed on disk since the last load.
+	 * Every decision point calls handsOff/handsOffReason, so this is the liveness funnel:
+	 * the menu's own apply path reloads directly, but an agent or operator editing the file
+	 * mid-session previously left the runtime reading stale disabledModels/thresholds until
+	 * restart (the compaction-reload defect). A stat per check is cheap against a file read.
+	 */
+	function syncSettings(ctx: ExtensionContext) {
+		if (!R.settingsLoaded) {
+			// Print mode never fires session_start: the first decision point loads.
+			loadSettings(ctx.cwd);
+			resolve(ctx);
+			return;
+		}
+		if (R.settingsStamp === settingsFileStamp(ctx.cwd)) return;
+		loadSettings(ctx.cwd);
+		resolve(ctx);
+		reportAppliedState(ctx);
+	}
+
 	/** Fully hands-off: rejected settings (fail-open — never brick the session), master switch off, launch flag, session toggle, model disabled by role/model, or window too small for the thresholds. */
 	function handsOff(ctx: ExtensionContext): boolean {
+		syncSettings(ctx);
 		return inert() !== undefined || R.disabled || R.flagDisabled || R.sessionDisabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
 	}
 
 	/** Why the extension is hands-off right now, for display. */
 	function handsOffReason(ctx: ExtensionContext): string | undefined {
+		syncSettings(ctx);
 		const problem = inert();
 		if (problem) return `settings rejected: ${problem}`;
 		if (R.disabled) return "disabled in self-compact.json";
@@ -466,14 +494,16 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/** OMP has no model_select/model_changed extension event: poll the model key so a /model or
 	 *  Ctrl+P switch repaints the gauge and re-resolves thresholds without waiting for the next
-	 *  agent event. Uses ctx.setInterval — managed, error-isolated, auto-cleared on shutdown. */
+	 *  agent event. The settings-file stamp rides along so a self-compact.json edit applies
+	 *  while a TUI pane sits idle between turns.
+	 *  Uses ctx.setInterval — managed, error-isolated, auto-cleared on shutdown. */
 	function startModelPoll(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui" || R.modelPollTimer) return;
 		const epoch = R.epoch;
 		R.modelPollTimer = ctx.setInterval(() => {
 			if (!R.alive || epoch !== R.epoch) { ctx.clearTimer(R.modelPollTimer); R.modelPollTimer = undefined; return; }
 			const key = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-			if (key !== R.lastModelKey) refreshUi(ctx);
+			if (key !== R.lastModelKey || R.settingsStamp !== settingsFileStamp(ctx.cwd)) refreshUi(ctx);
 		}, 2000);
 	}
 
@@ -594,6 +624,23 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return levelTag(R.level);
 	}
 
+	/**
+	 * The notification semantics of a settings (re)load: a rejected file is announced as
+	 * REJECTED, the effective hands-off reason once per change. Shared by session start
+	 * (recover) and the mid-session file-change reload in syncSettings.
+	 */
+	function reportAppliedState(ctx: ExtensionContext) {
+		const problem = inert();
+		if (problem) {
+			notify(ctx, `self-compact REJECTED settings: ${problem}. Self-compact is disabled for this session — tools are not blocked and native compaction still applies. Fix self-compact.json or the --compact-* flags, then restart or run /self-compact-settings.`, "error");
+		}
+		const off = handsOffReason(ctx);
+		if (off !== R.notifiedOffReason) {
+			R.notifiedOffReason = off;
+			if (off && !problem && ctx.hasUI) ctx.ui.notify(`self-compact: ${off} — hands-off for this session (native compaction still applies).`, "info");
+		}
+	}
+
 	function refreshUi(ctx: ExtensionContext) {
 		// session_start doesn't fire in print mode: load settings lazily on first refresh.
 		if (!R.settingsLoaded) loadSettings(ctx.cwd);
@@ -604,6 +651,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 			R.lastModelKey = modelKey;
 			loadSettings(ctx.cwd);
 			resolve(ctx);
+		} else {
+			// Model unchanged: paint with fresh settings if the file moved on disk
+			// (syncSettings is also the liveness funnel inside handsOff/handsOffReason).
+			syncSettings(ctx);
 		}
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
@@ -914,6 +965,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	}
 
 	function infoLines(ctx: ExtensionContext): { lines: string[]; data: Record<string, unknown> } {
+		syncSettings(ctx);
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
 		const t = R.thresholds;
@@ -987,6 +1039,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/** The agent's view of its own context: the same numbers as the footer, as plain JSON. */
 	function contextView(ctx: ExtensionContext) {
+		syncSettings(ctx);
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
 		const t = R.thresholds;
@@ -1056,6 +1109,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw new Error("Self-compaction cancelled before saving the note.");
+			syncSettings(ctx);
 			const problem = inert();
 			if (problem) throw new Error(`self-compact is inert because its settings were rejected: ${problem}`);
 			if (handsOff(ctx)) throw new Error(`self-compact is disabled for this session (${handsOffReason(ctx)}). Re-enable it in /self-compact-settings or self-compact.json.`);
@@ -1122,6 +1176,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerCommand("self-compact-now", {
 		description: "Ask the agent to write its note_to_self and call self_compact now (reuses a saved note on retry)",
 		handler: async (_args, ctx: ExtensionCommandContext) => {
+			syncSettings(ctx);
 			const problem = inert();
 			if (problem) {
 				notify(ctx, `self-compact: cannot compact, settings were rejected: ${problem}`, "error");
@@ -1237,13 +1292,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.lastModelKey = "";
 		loadSettings(ctx.cwd);
 		resolve(ctx);
-		const problem = inert();
-		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Self-compact is disabled for this session — tools are not blocked and native compaction still applies. Fix self-compact.json or the --compact-* flags, then restart or run /self-compact-settings.`, "error");
-		const off = handsOffReason(ctx);
-		if (off !== R.notifiedOffReason) {
-			R.notifiedOffReason = off;
-			if (off && !problem && ctx.hasUI) ctx.ui.notify(`self-compact: ${off} — hands-off for this session (native compaction still applies).`, "info");
-		}
+		reportAppliedState(ctx);
 
 		const recovered = recoverState(ctx.sessionManager.getBranch() as EntryLike[]);
 		R.state = recovered.state;
