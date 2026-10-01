@@ -1485,6 +1485,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
 		R.pendingCustomInstructions = event.customInstructions;
 		if (handsOff(ctx)) return undefined; // disabled: native compaction proceeds untouched
+		// Ownership marker for jev-compaction (L19 coexistence): stamping the
+		// preparation at handler entry — before runJevPrune or any deferral —
+		// tells the jev-compaction hook this compaction is ours, so it
+		// declines `self_compact_owner` instead of spending a second Jev pass
+		// on a region jev-prune may already have shrunk.
+		if (event?.preparation && typeof event.preparation === "object") {
+			(event.preparation as Record<string, unknown>).ompCompactionOwned = true;
+		}
 		if (R.compactionInFlight) {
 			// Our own ctx.compact(): validate the prompt early so a bad file cancels cleanly;
 			// the session.compacting hook supplies the prompt itself.
