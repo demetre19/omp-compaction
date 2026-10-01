@@ -12,6 +12,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { agentDirs } from "./agent-dir.ts";
 
 export const PROMPT_FILES = {
 	soft: "USER_PROMPT_SOFT_SELF_COMPACT.md",
@@ -67,11 +68,10 @@ Rules: never invent completed work; preserve exact file paths, commands, and err
 export const FORCED_PROMPT = `[self-compact · FORCED] Context usage is {{used_tokens}} tokens ({{used_percent}}), at the hard cutoff of {{forced_tokens}} ({{forced_percent}}). Every tool except \`self_compact\` is blocked until compaction succeeds. Write your \`note_to_self\` now (max {{note_max_chars}} chars: goal, DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last) and call \`self_compact\`. Do not call any other tool.`;
 
 export function promptSearchDirs(cwd: string, extensionDir: string): string[] {
-	const home = process.env.OMP_AGENT_DIR ?? join(homedir(), ".omp", "agent");
 	const dirs = [
 		resolve(cwd, ".omp", "self-compact"),
 		resolve(cwd, ".pi", "self-compact"),
-		join(home, "self-compact"),
+		...agentDirs().map((dir) => join(dir, "self-compact")),
 		join(homedir(), ".pi", "agent", "self-compact"),
 		join(extensionDir, "prompts"),
 	];

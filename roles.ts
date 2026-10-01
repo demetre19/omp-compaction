@@ -2,8 +2,13 @@
  * Role → model resolution for the compactDisabledRoles setting.
  *
  * OMP's extension API exposes only the resolved `ctx.model` ({provider, id}); the role that
- * produced it lives in `modelRoles` in ~/.omp/agent/config.yml (and optionally a project
- * .omp/config.yml). This module parses just that one flat mapping — a full YAML dependency
+ * produced it lives in `modelRoles` in the session's config.yml files. The search order mirrors
+ * what OMP resolves `--model pi/<role>` against: project `.omp/config.yml` first, then the
+ * session's agent dirs (PI_CODING_AGENT_DIR under --profile → OMP_AGENT_DIR → ~/.omp/agent —
+ * see agent-dir.ts). Resolving roles from an agent dir the session does not use disables the
+ * wrong model: a lane under `omp --profile prd-lane` reads the profile's modelRoles, not the
+ * operator-global map.
+ * This module parses just that one flat mapping — a full YAML dependency
  * cannot be assumed inside the extension sandbox — and turns a list of disabled role names
  * into the set of "provider/model" keys they resolve to.
  *
@@ -14,8 +19,8 @@
  *   enabledModels:                    # next top-level key ends the block
  */
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { agentDirs } from "./agent-dir.ts";
 
 /** Strip a trailing :effort suffix (low/medium/high/xhigh/max/…) — effort is not part of the model identity. */
 const EFFORT_SUFFIX = /:(?:min|low|medium|high|xhigh|max|none)$/i;
@@ -30,10 +35,9 @@ export function modelKey(model: { provider?: string; id?: string } | undefined):
 	return `${model.provider}/${model.id}`;
 }
 
-/** config.yml locations, project first (project values win on duplicate role names). */
+/** config.yml locations, highest precedence first: the session's project dir, then its agent dirs. */
 export function configSearchPaths(cwd: string): string[] {
-	const agentDir = process.env.OMP_AGENT_DIR ?? join(homedir(), ".omp", "agent");
-	return [resolve(cwd, ".omp", "config.yml"), join(agentDir, "config.yml")];
+	return [resolve(cwd, ".omp", "config.yml"), ...agentDirs().map((dir) => join(dir, "config.yml"))];
 }
 
 /**
@@ -67,11 +71,12 @@ export interface ResolvedRoles {
 	sources: string[];
 }
 
-/** Read every config.yml in search order and merge modelRoles (project wins). */
+/** Read every config.yml in search order and merge modelRoles (earlier paths — project, then profile — win). */
 export function loadModelRoles(cwd: string): ResolvedRoles {
 	const byRole: Record<string, string> = {};
 	const sources: string[] = [];
-	// Later paths are lower precedence, so read global first and let project overwrite.
+	// Paths are highest-precedence first, so read the chain in reverse: each
+	// earlier entry then overwrites whatever the less specific dirs set.
 	const paths = configSearchPaths(cwd);
 	for (let i = paths.length - 1; i >= 0; i--) {
 		const path = paths[i]!;

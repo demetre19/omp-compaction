@@ -4,7 +4,8 @@
  * Lookup order (first file found wins, whole file):
  *   1. <cwd>/.omp/self-compact.json        (project)
  *   2. <cwd>/.pi/self-compact.json         (upstream-Pi layout, parity)
- *   3. ~/.omp/agent/self-compact.json      (user-global)
+ *   3. <session agent dirs>/self-compact.json — PI_CODING_AGENT_DIR under --profile,
+ *      then OMP_AGENT_DIR, then ~/.omp/agent (agent-dir.ts)
  *   4. ~/.pi/agent/self-compact.json       (upstream-Pi global, parity)
  *
  * Keys (all optional; CLI flags still win over file values):
@@ -25,6 +26,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { agentDirs, primaryAgentDir } from "./agent-dir.ts";
 
 export interface ModelThresholdOverride {
 	compactSoftAt?: string;
@@ -67,11 +69,10 @@ export interface LoadedSettings {
 const FILE_NAME = "self-compact.json";
 
 export function settingsSearchPaths(cwd: string): string[] {
-	const agentDir = process.env.OMP_AGENT_DIR ?? join(homedir(), ".omp", "agent");
 	const paths = [
 		resolve(cwd, ".omp", FILE_NAME),
 		resolve(cwd, ".pi", FILE_NAME),
-		join(agentDir, FILE_NAME),
+		...agentDirs().map((dir) => join(dir, FILE_NAME)),
 		join(homedir(), ".pi", "agent", FILE_NAME),
 	];
 	return paths.filter((p, index) => paths.indexOf(p) === index);
@@ -239,9 +240,8 @@ export function writeSettingsFile(path: string, patch: Partial<Record<keyof File
 	return undefined;
 }
 
-/** Where the settings menu writes: the file already in effect, else the user-global path. */
+/** Where the settings menu writes: the file already in effect, else the session's primary agent dir. */
 export function settingsWritePath(cwd: string, currentSource?: string): string {
 	if (currentSource) return currentSource;
-	const agentDir = process.env.OMP_AGENT_DIR ?? join(homedir(), ".omp", "agent");
-	return join(agentDir, FILE_NAME);
+	return join(primaryAgentDir(), FILE_NAME);
 }
