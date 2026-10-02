@@ -53,7 +53,7 @@ export async function runSettingsMenu(ctx: ExtensionCommandContext, deps: Settin
 			{ label: `Warning threshold: ${v.compactAt}`, description: "Agent is asked to write its note and compact." },
 			{ label: `Forced buffer: ${v.compactBuffer}`, description: "Allowance above the warning line before every other tool is blocked." },
 			{ label: `Reference window: ${v.compactReferenceWindow ?? "model's own"}`, description: "Fixed window % thresholds resolve against (e.g. 1m): every model compacts at the same absolute tokens; smaller windows stay hands-off." },
-			{ label: `Disabled roles: ${v.compactDisabledRoles.join(", ") || "none"}`, description: "modelRoles names whose model never self-compacts (e.g. default → devin/swe-2)." },
+			{ label: `Disabled roles: ${v.compactDisabledRoles.join(", ") || "none"}`, description: "modelRoles names that never self-compact when the session selected that role (--model @role / pi/role / bare); the resolved model alone does not disable." },
 			{ label: `Disabled models: ${v.compactDisabledModels.join(", ") || "none"}`, description: "provider/model or provider/* entries that never self-compact." },
 			{ label: `Compaction prompt: ${v.compactPrompt ? `${v.compactPrompt.length} chars (custom)` : "default file"}`, description: "Literal text replacing the compaction summary prompt." },
 			{ label: DONE, description: "Close this menu." },

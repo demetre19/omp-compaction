@@ -68,7 +68,7 @@ import {
 } from "./prompts.ts";
 import { loadSettingsFile, settingsFileStamp, settingsSearchPaths, settingsWritePath, writeSettingsFile, type ModelThresholdOverride } from "./settings.ts";
 import { DEFAULT_JEV, jevPrunePreparation, type JevPruneSettings } from "./jev-prune.ts";
-import { isModelDisabled, loadModelRoles, modelKey, resolveDisabledModels, type DisabledModels } from "./roles.ts";
+import { isModelDisabled, launchModelSpec, loadModelRoles, modelKey, resolveDisabledModels, sessionRole, type DisabledModels } from "./roles.ts";
 import { runSettingsMenu, type MenuValues } from "./menu.ts";
 import {
 	HANDOFF_TYPE,
@@ -228,11 +228,17 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerFlag("compact-at", { description: `Warning threshold: ask the agent to write its note and compact (default ${DEFAULT_SPECS.at}).`, type: "string" });
 	pi.registerFlag("compact-buffer", { description: `Extra allowance above --compact-at before other tools are blocked (default ${DEFAULT_SPECS.buffer}; 0 = immediate).`, type: "string" });
 	pi.registerFlag("compact-prompt", { description: "Literal text that replaces the compaction summary prompt.", type: "string" });
-	pi.registerFlag("compact-disable-role", { description: "modelRoles name whose model never self-compacts (repeatable or comma-separated).", type: "string" });
+	pi.registerFlag("compact-disable-role", { description: "modelRoles name that never self-compacts when the session selected it (repeatable or comma-separated).", type: "string" });
 	pi.registerFlag("compact-disable-model", { description: "provider/model (or provider/*) that never self-compacts (repeatable or comma-separated).", type: "string" });
 	pi.registerFlag("compact-reference-window", { description: "Fixed window that percentage thresholds resolve against (e.g. 1m): every model compacts at the same absolute tokens; windows too small for warn+buffer stay hands-off.", type: "string" });
 	pi.registerFlag("compact-off", { description: "Start hands-off: no guidance, no lock, native compaction untouched. Same as /self-compact-toggle off but from launch.", type: "boolean" });
 	pi.registerFlag("compact-jev", { description: "Jev verdict-prune of stale tool calls/results before summarization (on/off, default on). Falls back to plain native compaction when unavailable.", type: "string" });
+
+	/** The launch `--model` spec (e.g. "pi/TOP-DOG", "@task", "devin/swe-2:max"): the
+	 * role selector OMP resolved ctx.model from. argv never changes mid-process, so it
+	 * is captured once here; sessionRole() consults it only when the session entries
+	 * don't name a role (the launch model_change record is written unroled). */
+	const launchSpec = launchModelSpec(process.argv);
 
 	const R: Runtime = {
 		specs: { ...DEFAULT_SPECS },
@@ -241,7 +247,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		disabled: false,
 		flagDisabled: false,
 		sessionDisabled: false,
-		disabledModels: { keys: {}, roles: {}, unknownRoles: [], direct: [] },
+		disabledModels: { roleNames: new Set(), keys: {}, roles: {}, unknownRoles: [], knownRoles: new Set(), direct: [] },
 		modelThresholds: {},
 		jev: { ...DEFAULT_JEV },
 		jevNoticed: false,
@@ -434,10 +440,22 @@ export default function selfCompact(pi: ExtensionAPI) {
 		reportAppliedState(ctx);
 	}
 
-	/** Fully hands-off: rejected settings (fail-open — never brick the session), master switch off, launch flag, session toggle, model disabled by role/model, or window too small for the thresholds. */
+	/** The role the session's model was selected under — fresh read every call so
+	 * mid-session role switches take effect without a settings reload. */
+	function selectedRole(ctx: ExtensionContext): string {
+		return sessionRole(ctx.sessionManager, R.disabledModels, launchSpec);
+	}
+
+	/** True when the session selected a compactDisabledRoles role (launch spec or stamped model_change). */
+	function isRoleDisabledForSession(ctx: ExtensionContext): boolean {
+		return R.disabledModels.roleNames.size > 0 && R.disabledModels.roleNames.has(selectedRole(ctx));
+	}
+
+	/** Fully hands-off: rejected settings (fail-open — never brick the session), master switch off, launch flag, session toggle, session selected a disabled role, model disabled directly, or window too small for the thresholds. */
 	function handsOff(ctx: ExtensionContext): boolean {
 		syncSettings(ctx);
-		return inert() !== undefined || R.disabled || R.flagDisabled || R.sessionDisabled || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
+		if (inert() !== undefined || R.disabled || R.flagDisabled || R.sessionDisabled) return true;
+		return isRoleDisabledForSession(ctx) || isModelDisabled(ctx.model, R.disabledModels) || windowTooSmall();
 	}
 
 	/** Why the extension is hands-off right now, for display. */
@@ -448,10 +466,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (R.disabled) return "disabled in self-compact.json";
 		if (R.flagDisabled) return "disabled by --compact-off";
 		if (R.sessionDisabled) return "disabled for this session (/self-compact-toggle or ctrl+shift+k to re-enable)";
+		if (isRoleDisabledForSession(ctx)) {
+			return `role ${selectedRole(ctx)} is disabled (compactDisabledRoles matches the role the session selected, not the resolved model)`;
+		}
 		const key = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 		if (key && isModelDisabled(ctx.model, R.disabledModels)) {
-			const role = Object.entries(R.disabledModels.roles).find(([, k]) => k === key)?.[0];
-			return `model ${key} is disabled${role ? ` (role ${role})` : ""}`;
+			return `model ${key} is disabled`;
 		}
 		if (windowTooSmall()) {
 			const t = R.thresholds!;
@@ -502,7 +522,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const epoch = R.epoch;
 		R.modelPollTimer = ctx.setInterval(() => {
 			if (!R.alive || epoch !== R.epoch) { ctx.clearTimer(R.modelPollTimer); R.modelPollTimer = undefined; return; }
-			const key = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+			const key = `${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : ""}|${selectedRole(ctx)}`;
 			if (key !== R.lastModelKey || R.settingsStamp !== settingsFileStamp(ctx.cwd)) refreshUi(ctx);
 		}, 2000);
 	}
@@ -644,9 +664,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 	function refreshUi(ctx: ExtensionContext) {
 		// session_start doesn't fire in print mode: load settings lazily on first refresh.
 		if (!R.settingsLoaded) loadSettings(ctx.cwd);
-		// OMP has no model_select event: a changed model key re-reads settings (role/model
-		// disables may target the new model) and re-resolves thresholds against its window.
-		const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+		// OMP has no model_select event: a changed model key or selected role re-reads
+		// settings (role disables may target the new selection) and re-resolves thresholds.
+		const modelKey = `${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : ""}|${selectedRole(ctx)}`;
 		if (modelKey !== R.lastModelKey) {
 			R.lastModelKey = modelKey;
 			loadSettings(ctx.cwd);

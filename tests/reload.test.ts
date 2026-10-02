@@ -117,6 +117,8 @@ interface CtxOpts {
 	hasUI?: boolean;
 	ui?: Partial<FakeUi>;
 	tokens?: number;
+	/** Session-branch entries exposed via sessionManager.getBranch() (model_change stamps). */
+	branch?: unknown[];
 }
 
 interface FakeUi {
@@ -172,7 +174,7 @@ function makeCtx(o: CtxOpts): FakeCtx {
 		setInterval: () => 0,
 		clearTimer: () => {},
 		getContextUsage: () => ({ tokens: o.tokens ?? 0, percent: null, contextWindow: o.model?.contextWindow ?? 0 }),
-		sessionManager: { getBranch: () => [] },
+		sessionManager: { getBranch: () => o.branch ?? [] },
 		compact: async () => {},
 		ui,
 		notifications,
@@ -189,10 +191,12 @@ const savedEnv = new Map<string, string | undefined>();
 for (const k of ENV_KEYS) savedEnv.set(k, process.env[k]);
 
 let dirs: string[] = [];
+const savedArgv = process.argv;
 beforeEach(() => {
 	dirs = [];
 });
 afterEach(() => {
+	process.argv = savedArgv;
 	for (const k of ENV_KEYS) {
 		const v = savedEnv.get(k);
 		if (v === undefined) delete process.env[k];
@@ -305,22 +309,49 @@ describe("mid-session settings reload", () => {
 		expect(await liveViaSystemPrompt(pi, ctx)).toBe(true);
 	});
 
-	test("role-scoped disable written mid-session resolves against modelRoles", async () => {
+	test("role-scoped disable applies only when the session selected the role", async () => {
 		const f = fixture();
-		// modelRoles maps BOSS-ROLE to the active model; the settings file names the role.
-		writeFileSync(join(f.agentDir, "config.yml"), "modelRoles:\n  BOSS-ROLE: test/swe-2\n");
-		f.writeSettings(BASE_SETTINGS);
+		// modelRoles maps BOSS-ROLE to the SAME model the session runs — the reported
+		// defect config: disabling the role must not follow the shared model.
+		writeFileSync(join(f.agentDir, "config.yml"), "modelRoles:\n  BOSS-ROLE: test/swe-2\n  default: test/swe-2\n");
+		f.writeSettings({ ...BASE_SETTINGS, compactDisabledRoles: ["BOSS-ROLE"] });
 		const pi = makePi();
 		selfCompact(extensionPi(pi));
-		const ctx = makeCtx({ cwd: f.cwd, model: MODEL });
+		// Default launch: role-less root model_change, no --model → role is "default",
+		// not BOSS-ROLE → stays live even though the model matches.
+		const entries: unknown[] = [{ type: "model_change", parentId: null }];
+		const ctx = makeCtx({ cwd: f.cwd, model: MODEL, branch: entries });
 		await startSession(pi, ctx);
 		expect(await liveViaSystemPrompt(pi, ctx)).toBe(true);
 
-		f.writeSettings({ ...BASE_SETTINGS, compactDisabledRoles: ["BOSS-ROLE"] });
-
+		// Selecting the role mid-session (stamped model_change) disables live.
+		entries.push({ type: "model_change", parentId: "a", role: "BOSS-ROLE" });
 		expect(await liveViaSystemPrompt(pi, ctx)).toBe(false);
 		await command(pi, "self-compact-info").handler("", ctx);
-		expect(infoDisabledReason(pi)).toBe("model test/swe-2 is disabled (role BOSS-ROLE)");
+		expect(infoDisabledReason(pi)).toBe(
+			"role BOSS-ROLE is disabled (compactDisabledRoles matches the role the session selected, not the resolved model)",
+		);
+
+		// Switching back out of the role re-enables.
+		entries.push({ type: "model_change", parentId: "b", role: "default" });
+		expect(await liveViaSystemPrompt(pi, ctx)).toBe(true);
+	});
+
+	test("launch --model pi/<role> disables a session whose model matches the default", async () => {
+		const f = fixture();
+		writeFileSync(join(f.agentDir, "config.yml"), "modelRoles:\n  TOPDOG: test/swe-2\n  default: test/swe-2\n");
+		f.writeSettings({ ...BASE_SETTINGS, compactDisabledRoles: ["TOPDOG"] });
+		const pi = makePi();
+		// Launch spec is captured when the extension factory runs.
+		process.argv = [...savedArgv, "--model", "pi/TOPDOG"];
+		selfCompact(extensionPi(pi));
+		const ctx = makeCtx({
+			cwd: f.cwd,
+			model: MODEL,
+			branch: [{ type: "model_change", parentId: null }],
+		});
+		await startSession(pi, ctx);
+		expect(await liveViaSystemPrompt(pi, ctx)).toBe(false);
 	});
 
 	test("settings file created mid-session applies without restart", async () => {
