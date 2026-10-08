@@ -678,12 +678,45 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
+		releaseStaleLock(ctx);
 		// OMP's setFooter is a no-op stub (extension-ui-controller.ts). The colored channel is
 		// setWidget (Text preserves ANSI); the status-line hook segment is the plain fallback.
 		if (ctx.mode === "tui") {
 			ctx.ui.setWidget("self-compact", [coloredStatusLine(ctx)], { placement: "belowEditor" });
 		} else if (ctx.hasUI) {
 			ctx.ui.setStatus("self-compact", [contextBarText(), statusTag(ctx)].filter(Boolean).join(" "));
+		}
+	}
+
+	/**
+	 * A lock must never outlive the context that earned it. handsOff covers every
+	 * "this session cannot compact" switch — disabled role/model, master switch,
+	 * session toggle, too-small window, rejected settings — and the lock is journaled,
+	 * so without this release a model/role/settings change into hands-off bricks the
+	 * session permanently (and restarts re-brick via recoverState). A saved note in a
+	 * hands-off context can never compact, so the handoff retires to "done" rather
+	 * than re-locking a session the extension refuses to touch.
+	 * The second arm is the model-switch case on a still-enabled context: usage below
+	 * the new model's forced line with no handoff in flight means the lock is orphaned
+	 * state; release it and let trackLevel re-engage at the new forced point.
+	 * Called from refreshUi (every decision point funnels through it: tool_call,
+	 * model_select, the 2s TUI poll, settle) and from recover.
+	 */
+	function releaseStaleLock(ctx: ExtensionContext) {
+		const h = handoff();
+		if (handsOff(ctx)) {
+			const retiredNote = h !== undefined && h.status !== "done";
+			const wasLocked = locked();
+			if (retiredNote) R.state.handoff = { ...h!, status: "done" };
+			if (wasLocked) setLocked(false);
+			if (retiredNote || wasLocked) {
+				save();
+				notify(ctx, `self-compact: ${handsOffReason(ctx) ?? "extension is hands-off"} — released the tool lock${retiredNote ? " and retired the saved note" : ""}.`, "warning");
+			}
+		} else if (locked() && !activeHandoff() && R.level !== "forced") {
+			setLocked(false);
+			save();
+			notify(ctx, "self-compact: released a tool lock that no longer matches this context (model or usage changed).", "warning");
 		}
 	}
 
@@ -1345,15 +1378,23 @@ export default function selfCompact(pi: ExtensionAPI) {
 				notify(ctx, `self-compact: compaction finished before ${event.reason}; returning the saved note.`, "info");
 				deliverHandoff(ctx);
 			}
-		} else if (h && (h.status === "pending" || h.status === "failed" || h.status === "compacting") && !handsOff(ctx)) {
-			R.state.handoff = { ...h, status: h.status === "compacting" ? "failed" : h.status, attempts: 0, error: h.status === "compacting" ? "Compaction was interrupted (session reloaded)." : h.error };
-			setLocked(true);
-			save();
-			notify(ctx, `self-compact: restored a saved note (${h.note.length} chars, ${event.reason}). Tools stay locked until compaction succeeds.`, "warning");
-			deferInEpoch("recoveryTimer", 500, () => {
-				const current = handoff();
-				if (current && (current.status === "pending" || current.status === "failed") && ctx.isIdle()) startCompaction(ctx, `recovery after ${event.reason}`);
-			});
+		} else {
+			// Never restore the lock into a context that can't compact (model/role/settings
+			// changed while the session was down — the journaled lock would re-brick it),
+			// and never keep a journaled lock with no handoff behind it. The handoff can
+			// change here, so re-read it.
+			releaseStaleLock(ctx);
+			const current = handoff();
+			if (current && (current.status === "pending" || current.status === "failed" || current.status === "compacting") && !handsOff(ctx)) {
+				R.state.handoff = { ...current, status: current.status === "compacting" ? "failed" : current.status, attempts: 0, error: current.status === "compacting" ? "Compaction was interrupted (session reloaded)." : current.error };
+				setLocked(true);
+				save();
+				notify(ctx, `self-compact: restored a saved note (${current.note.length} chars, ${event.reason}). Tools stay locked until compaction succeeds.`, "warning");
+				deferInEpoch("recoveryTimer", 500, () => {
+					const later = handoff();
+					if (later && (later.status === "pending" || later.status === "failed") && ctx.isIdle()) startCompaction(ctx, `recovery after ${event.reason}`);
+				});
+			}
 		}
 		startModelPoll(ctx);
 		await trackLevel(ctx);
