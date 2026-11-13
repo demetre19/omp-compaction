@@ -187,7 +187,7 @@ interface Runtime {
 }
 
 function nowPrompt(saved?: string): string {
-	const base = `Compact now: write your note_to_self (max ${NOTE_MAX_CHARS} chars: goal, DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last) and call ${TOOL_NAME} as your only tool call.`;
+	const base = `Compact now: write your note_to_self (max ${NOTE_MAX_CHARS} chars: GOAL first, then DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last). Put the most carry-forward-critical fields FIRST — a note that runs over the cap is TRUNCATED at the cap, never refused, so the tail is what is lost. Call ${TOOL_NAME} as your only tool call.`;
 	if (!saved) return base;
 	return `${base}\n\nA note is already saved from a previous attempt. Pass it to ${TOOL_NAME} verbatim instead of inventing a new one. Saved note, verbatim:\n\n${saved}\n\n---\nCall ${TOOL_NAME} now with exactly that note.`;
 }
@@ -1169,7 +1169,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 			// The note is preserved byte for byte; only the checks look at the trimmed form.
 			const raw = typeof params.note_to_self === "string" ? params.note_to_self : "";
 			if (raw.trim().length === 0) throw new Error("note_to_self must not be blank. Write the goal, DONE work, IN PROGRESS state, decisions, test results, and the NEXT ACTION.");
-			if (raw.length > NOTE_MAX_CHARS) throw new Error(`note_to_self exceeds ${NOTE_MAX_CHARS} characters (${raw.length}). Shorten it and call ${TOOL_NAME} again.`);
+			// An over-cap note TRUNCATES, never throws — a hard refuse is the
+			// wedge: the retry note only ever gets longer. Front-load goal +
+			// NEXT ACTION so the tail is what gets cut, not the carry-forward.
+			const noteText = raw.length > NOTE_MAX_CHARS
+				? `${raw.slice(0, NOTE_MAX_CHARS)}\n\n[self-compact: note truncated from ${raw.length} chars at NOTE_MAX_CHARS=${NOTE_MAX_CHARS}]`
+				: raw;
 			const existing = activeHandoff();
 			if (existing && (existing.status === "compacting" || existing.status === "ready")) throw new Error("Compaction is already in progress for the saved note.");
 			if (!(await compactable(ctx))) {
@@ -1181,7 +1186,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 				throw new Error(`A note is already saved (${existing.note.length} chars). Retry ${TOOL_NAME} with that saved note verbatim instead of a new one.`);
 			}
 			// A retry keeps the original bytes; a new cycle gets a fresh durable id.
-			const note = existing ? existing.note : raw;
+			const note = existing ? existing.note : noteText;
 			R.state.handoff = { id: existing?.id ?? randomUUID(), note, status: "pending", attempts: 0, savedAt: Date.now() };
 			R.lastCompactionError = undefined;
 			setLocked(true);
